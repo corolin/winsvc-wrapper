@@ -1,0 +1,31 @@
+[package]
+name = "rsw"
+version = "0.1.0"
+edition = "2024"
+description = "Rust Service Wrapper: declarative Windows service wrapper (WinSW-style config, native Rust runtime)"
+license = "MIT"
+repository = "https://github.com/corolin/winsvc-wrapper"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
+dunce = "1.0.5"
+quick-xml = "0.42.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
+thiserror = "2.0.20"
+toml = { version = "1.1.5", default-features = false, features = ["parse", "display", "serde", "std"] }
+ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
+windows = { version = "0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_NetworkManagement_WNet", "Win32_Security_Authentication_Identity", "Win32_System_Services", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_Time", "Win32_UI_Shell"] }
+windows-service = "0.8.1"
+
+[dev-dependencies]
+tempfile = "3"
+windows = { version = "0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Services", "Win32_System_Threading"] }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+strip = true
+codegen-units = 1

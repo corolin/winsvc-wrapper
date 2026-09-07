@@ -1,0 +1,351 @@
+# ============================================================================
+# rsw example configuration — every field with bilingual annotations
+# rsw 配置示例 —— 全部字段，中英双语注释
+#
+# Place next to rsw.exe (optionally renamed) or pass explicitly:
+# 将本文件放在 rsw.exe 旁边（rsw.exe 可改名），或通过命令行显式传入：
+#   rsw install rsw.example.toml
+#
+# %BASE% expands to the directory containing THIS file, in every string
+# field below; %ANY_VAR% expands from the process environment.
+# 在下方所有字符串字段中，%BASE% 展开为本文件所在目录；
+# %任意变量% 从进程环境变量展开。相对路径一律基于本文件所在目录。
+# ============================================================================
+
+[service]
+# EN: unique Windows service id (REQUIRED). Used by the SCM, must not
+#     contain '/' or '\'.
+# 中文：Windows 服务的唯一标识（必填）。供 SCM 使用，不能含 '/' 或 '\'。
+id = "my-app"
+
+# EN: display name shown in services.msc. Defaults to the id.
+# 中文：services.msc 中显示的名称。默认与 id 相同。
+name = "My Application"
+
+# EN: longer description shown in the service properties dialog.
+# 中文：服务属性对话框中显示的详细描述。
+description = "Example service wrapped by rsw"
+
+# EN: how the service starts at boot:
+#     "auto"     start at boot
+#     "delayed"  start at boot, after other auto services (recommended for apps)
+#     "manual"   started on demand (sc start / rsw start)
+#     "disabled" cannot be started
+#     "boot"/"system" driver-only start types
+# 中文：开机启动方式：
+#     "auto"     开机自动启动
+#     "delayed"  开机延迟启动（等其他自动服务就绪后，应用服务推荐）
+#     "manual"   手动启动（sc start / rsw start）
+#     "disabled" 禁用，无法启动
+#     "boot"/"system" 仅驱动使用的启动类型
+start_type = "auto"
+
+# EN: service ids that must start before this one.
+# 中文：必须在本服务之前启动的其他服务 id。
+dependencies = ["Tcpip"]
+
+# EN: how long without failures before the SCM failure counter resets.
+#     Suffixes: ms/sec/min/hr/day; a bare number means milliseconds.
+# 中文：无失败持续多久后，SCM 的失败计数清零。
+#     单位后缀：ms/sec/min/hr/day；纯数字表示毫秒。
+failure_reset_after = "1 day"
+
+# EN: accept Windows preshutdown notifications (service gets extra time
+#     to stop cleanly before the system goes down).
+# 中文：接收 Windows 预关机通知（系统关机前给服务额外的优雅停止时间）。
+preshutdown = false
+
+# EN: max seconds granted during preshutdown (when preshutdown = true).
+# 中文：预关机时允许的最长停止时间（秒），仅当 preshutdown = true 时生效。
+preshutdown_timeout_secs = 180
+
+# EN: SDDL security descriptor restricting who can control the service.
+# 中文：SDDL 安全描述符，限制哪些账户可以控制本服务。按需取消注释。
+# security_descriptor = "D:P(A;;GA;;;BA)(A;;GR;;;AU)"
+
+# EN: run the service as a specific account. Omit the whole section for
+#     LocalSystem. Passwords in this file are PLAINTEXT — for real accounts,
+#     prefer installing without [service.account], then set the account in
+#     services.msc (rsw refresh will not overwrite it when the section is
+#     absent).
+# 中文：以指定账户运行服务。删除整个 [service.account] 段 = 以 LocalSystem
+#     运行。注意：写在本文件里的密码是明文——真实账户建议先不写此段完成
+#     安装，再到 services.msc 里设置账户（本段缺省时 refresh 不会覆盖）。
+#     虚拟账户（NT AUTHORITY\LocalService / NetworkService）无需密码。
+[service.account]
+username = "NT AUTHORITY\\NetworkService"
+password = ""
+allow_logon_as_service = false   # virtual accounts already hold this right / 虚拟账户已自带此权限
+
+[process]
+# EN: the program to wrap (REQUIRED).
+#     - bare names ("node.exe") resolve through PATH — but the service
+#       account's PATH differs from yours; absolute paths are safer.
+#     - relative paths resolve against the config directory.
+# 中文：被包装的程序（必填）。
+#     - 裸命令名（"node.exe"）会走 PATH 查找——但服务账户的 PATH 与你的
+#       用户 PATH 不同，绝对路径更稳妥。
+#     - 相对路径基于本配置文件所在目录。
+executable = "C:/Program Files/nodejs/node.exe"
+
+# EN: arguments passed to the program. Each array element is ONE argument:
+#     spaces inside quotes are preserved, no re-splitting happens.
+#     %VAR% expands inside every element.
+# 中文：传给程序的参数。数组每个元素就是一个独立参数：引号内的空格原样
+#     保留，不会被二次拆分。每个元素内都会做 %VAR% 变量展开。
+arguments = [
+    "server.js",
+    "--host", "127.0.0.1",
+    "--port", "8080",
+    "--config", "%BASE%/config/app.conf",
+]
+
+# EN: if non-empty, replaces `arguments` when the service starts
+#     (WinSW <startarguments> compatibility).
+# 中文：非空时在服务启动时替代 `arguments`（对应 WinSW 的 <startarguments>）。
+start_arguments = []
+
+# EN: working directory for the child. Defaults to the config directory.
+# 中文：子进程的工作目录。默认为本配置文件所在目录。
+working_dir = "%BASE%"
+
+# EN: stop helper command. When set, rsw runs THIS instead of sending a
+#     signal (for programs that only stop via a dedicated command/API call).
+# 中文：停止辅助命令。设置后 rsw 运行该命令来完成停止，不再发送控制台
+#     信号（适用于只能通过专用命令/接口关闭的程序）。
+stop_executable = ""
+stop_arguments = []
+
+# EN: seconds to wait after the stop request before force-killing the
+#     whole process tree. Ignored when stop_signal = "kill" (immediate).
+# 中文：发出停止请求后等待的秒数，超时则强杀整棵进程树。
+#     stop_signal = "kill" 时忽略本项（立即强杀）。
+stop_timeout_secs = 15
+
+# EN: how to ask the child to stop (DEFAULT: "kill"):
+#     "kill"        TerminateProcess + job-object tree kill immediately;
+#                   stop_timeout_secs is ignored; no flush/cleanup chance
+#     "ctrl-c"      graceful console signal — the child can flush state and
+#                   clean up; use for JVM/node/anything with shutdown hooks
+#     "ctrl-break"  targeted ctrl-break (works even for children that
+#                   disable ctrl-c)
+# 中文：停止子进程的方式（默认："kill"）：
+#     "kill"        立即 TerminateProcess + Job Object 树杀；
+#                   忽略 stop_timeout_secs；子进程没有机会落盘/清理
+#     "ctrl-c"      优雅的控制台信号——子进程可以刷缓冲、做清理；适合
+#                   JVM/node/一切带关闭钩子的程序
+#     "ctrl-break"  定向 ctrl-break（对禁用了 ctrl-c 的子进程也有效）
+stop_signal = "kill"
+
+# EN: child process priority: idle | below-normal | normal |
+#     above-normal | high | realtime.
+# 中文：子进程的 CPU 优先级：idle | below-normal | normal |
+#     above-normal | high | realtime。
+priority = "normal"
+
+# EN: create the child without a console window (default true — service
+#     children should never pop up consoles; stop signals still reach it).
+# 中文：不给子进程分配可见控制台窗口（默认 true——服务子进程不应弹出
+#     控制台；停止信号仍可送达）。
+hide_window = true
+
+# EN: child exit codes that count as SUCCESS (mapped to service
+#     NO_ERROR; the SCM failure counter does not tick for these).
+# 中文：视为“成功”的子进程退出码（映射为服务 NO_ERROR，SCM 的失败
+#     计数不会对这些码累加）。
+success_exit_codes = [0]
+
+# ---------------------------------------------------------------------------
+# EN: in-wrapper restart policy. WITHOUT this section (the default), any
+#     child exit exits the service with the same code — the SCM failure
+#     actions below take over immediately (WinSW parity). WITH this section,
+#     rsw restarts the child in-process (millisecond-fast, logs keep
+#     flowing); when retries are exhausted the service exits with the child's
+#     code and hands over to [[on_failure]].
+# 中文：包装器内的重启策略。没有本段（默认）时：子进程退出，服务就以相同
+#     退出码退出——由下方的 SCM 失败动作立即接管（与 WinSW 行为一致）。
+#     显式配置本段后，rsw 会在进程内重启子进程（毫秒级，日志与管道不断开）；
+#     重试次数用尽后，服务带着子进程的退出码退出，交给 [[on_failure]]。
+# ---------------------------------------------------------------------------
+[process.restart]
+
+# EN: when to restart the child:
+#     "never"      never restart inside the wrapper (pure SCM handling)
+#     "on-failure" restart when the exit code is NOT in success_exit_codes
+#     "always"     restart on every exit, success or not
+#     "custom"     use restart_if / restart_if_not lists
+# 中文：何时重启子进程：
+#     "never"      包装器内不重启，完全交给 SCM 失败动作
+#     "on-failure" 退出码不在 success_exit_codes 中时重启
+#     "always"     无论退出码是什么都重启
+#     "custom"     使用 restart_if / restart_if_not 列表精确控制
+policy = "on-failure"
+
+# EN: custom mode — restart ONLY for these exit codes.
+# 中文：custom 模式——仅对这些退出码重启。
+restart_if = []
+
+# EN: custom mode — restart for every code EXCEPT these.
+# 中文：custom 模式——除这些退出码外都重启。
+restart_if_not = []
+
+# EN: seconds to wait before each restart attempt.
+# 中文：每次重启前等待的秒数。
+delay_secs = 5
+
+# EN: exponential backoff (5 → 10 → 20 … capped at 60s); the counter
+#     resets after 60 seconds of stable uptime.
+# 中文：指数退避（5 → 10 → 20 …封顶 60 秒）；稳定运行 60 秒后计数归零。
+backoff = true
+
+# EN: max consecutive restarts before giving up and exiting the service
+#     (handing over to [[on_failure]]). 0 = unlimited.
+# 中文：连续重启的最大次数，超过后放弃并退出服务（交给 [[on_failure]]）。
+#     0 = 不限次数。
+max_retries = 0
+
+# ---------------------------------------------------------------------------
+# EN: environment variables injected into the child (on top of the system
+#     environment). Values support %BASE% and %VAR% expansion. rsw always
+#     adds BASE, SERVICE_ID, RSW_EXECUTABLE (plus WINSW_* aliases).
+# 中文：注入子进程的环境变量（叠加在系统环境之上）。取值支持 %BASE% 与
+#     %VAR% 展开。rsw 始终额外注入 BASE、SERVICE_ID、RSW_EXECUTABLE
+#     （以及 WINSW_* 兼容别名）。
+# ---------------------------------------------------------------------------
+[env]
+NODE_ENV = "production"
+DATA_DIR = "%BASE%/data"
+
+# ---------------------------------------------------------------------------
+# EN: SCM-native failure recovery. Fires when the SERVICE exits non-cleanly
+#     (including "restarts exhausted" above). These are Windows recovery
+#     actions — they work even if rsw itself dies. Entries apply in order,
+#     the last one repeats.
+# 中文：SCM 原生失败恢复动作。服务非正常退出时触发（包括上方重试次数用尽
+#     的情况）。这是 Windows 原生恢复机制——即使 rsw 自身崩溃也照常生效。
+#     多条按顺序生效，最后一条循环使用。
+# ---------------------------------------------------------------------------
+[[on_failure]]
+action = "restart"     # restart | reboot | none / 重启 | 重启机器 | 不动作
+delay = "10 sec"
+
+[[on_failure]]
+action = "restart"
+delay = "30 sec"
+
+# ---------------------------------------------------------------------------
+# EN: log handling for the child's stdout/stderr. The child never touches
+#     log files directly — rsw pumps the pipes.
+# 中文：子进程 stdout/stderr 的日志处理。子进程从不直接接触日志文件，
+#     由 rsw 通过管道搬运。
+# ---------------------------------------------------------------------------
+[logging]
+
+# EN: log directory (created automatically). Default: the config directory.
+# 中文：日志目录（自动创建）。默认为本配置文件所在目录。
+dir = "%BASE%/logs"
+
+# EN: base name for log files. Default: the config file's stem.
+#     stdout → <base>.out.log, stderr → <base>.err.log,
+#     wrapper events → <base>.wrapper.log
+# 中文：日志文件的基础名。默认取配置文件名（去扩展名）。
+#     标准输出 → <base>.out.log，标准错误 → <base>.err.log，
+#     rsw 自身事件 → <base>.wrapper.log
+basename = "my-app"
+
+# EN: also echo child output to the console of the service (rarely useful
+#     for services; intended for `rsw run` debugging).
+# 中文：把子进程输出同时回显到服务控制台（服务场景很少用到，主要为
+#     `rsw run` 前台调试设计）。
+wrapper_log = true
+
+# EN: rotation mode:
+#     "append"            single file, grows forever
+#     "reset"             truncate at every service start
+#     "none"              discard child output
+#     "roll"              rename to <base>.old at every service start
+#     "roll-by-size"      rotate when the live file exceeds size_threshold_mb
+#     "roll-by-time"      write into a file named by time_pattern
+#     "roll-by-size-time" rotate on size, date change, or auto_roll_at
+# 中文：轮转模式：
+#     "append"            单文件持续追加
+#     "reset"             每次服务启动时清空
+#     "none"              丢弃子进程输出
+#     "roll"              每次服务启动时改名为 <base>.old
+#     "roll-by-size"      超过 size_threshold_mb 时轮转
+#     "roll-by-time"      直接写入按 time_pattern 命名的文件
+#     "roll-by-size-time" 大小、日期变化或 auto_roll_at 任一满足即轮转
+mode = "roll-by-size"
+
+# EN: size threshold (MB) for the size-based modes.
+# 中文：基于大小的轮转阈值（MB）。
+size_threshold_mb = 10
+
+# EN: date pattern for time-based names. Tokens: yyyy yy MM dd HH mm ss
+#     (WinSW .NET-style).
+# 中文：时间轮转的日期命名格式。支持标记：yyyy yy MM dd HH mm ss
+#     （与 WinSW 的 .NET 风格一致）。
+time_pattern = "yyyyMMdd"
+
+# EN: time of day for an extra forced rotation (roll-by-size-time only).
+# 中文：每天在该时刻额外强制轮转一次（仅 roll-by-size-time 模式）。
+auto_roll_at = "00:00:00"
+
+# EN: rotated files to keep per stream; -1 keeps everything.
+# 中文：每路日志保留的轮转文件数；-1 表示全部保留。
+keep_files = 8
+
+# EN: merge stderr into the stdout log instead of a separate .err.log.
+# 中文：把 stderr 合并进 stdout 日志，而不是单独的 .err.log。
+merge_stderr = false
+
+# ---------------------------------------------------------------------------
+# EN: files downloaded at every service start, before the child spawns.
+#     Conditional GET: unchanged files (per the server's Last-Modified) are
+#     skipped. Written to <to>.tmp then renamed — never half-written.
+# 中文：每次服务启动时、子进程启动前下载的文件。支持条件请求：与服务器
+#     相比未变化的文件（依据 Last-Modified）自动跳过。先写临时文件再改名，
+#     不会出现写了一半的文件。
+# ---------------------------------------------------------------------------
+[[download]]
+from = "https://example.com/agent/agent.jar"
+to = "%BASE%/downloads/agent.jar"
+
+# EN: fail the service start when a download fails (default: log a warning
+#     and continue with whatever is on disk).
+# 中文：下载失败时是否让服务启动失败（默认：仅记录警告，继续用磁盘上的
+#     旧文件启动）。
+fail_on_error = false
+
+# EN: HTTP(S) proxy, optionally with credentials: http://user:pass@host:port
+# 中文：HTTP(S) 代理，可带凭据：http://user:pass@host:port
+# proxy = "http://proxy.corp.local:8080"
+
+# EN: basic auth for the download (SSPI is not supported).
+# 中文：下载的 Basic 认证（不支持 SSPI）。
+# auth = { kind = "basic", user = "deploy", password = "secret" }
+
+# ---------------------------------------------------------------------------
+# EN: map a network drive letter to a UNC share before the child starts.
+# 中文：在子进程启动前把网络驱动器号映射到 UNC 共享路径。
+# ---------------------------------------------------------------------------
+[[map_drive]]
+label = "N:"
+unc_path = "\\\\fileserver.corp.local\\share"
+
+# ---------------------------------------------------------------------------
+# EN: lifecycle hooks — short commands around the child's lifetime. Each
+#     hook: executable + arguments, output paths ("NUL" discards), and a
+#     timeout after which the hook AND its children are killed. The service
+#     waits for hooks: pre_start failure aborts the start; the stop ladder
+#     waits for pre_stop before signalling the child.
+# 中文：生命周期钩子——围绕子进程生命周期的短命令。每个钩子包含
+#     executable + arguments、输出重定向路径（"NUL" 表示丢弃）、超时秒数
+#     （超时后钩子及其子进程一并被杀）。服务会等待钩子完成：pre_start
+#     失败会中止启动；停止流程会先等 pre_stop 完成再向子进程发信号。
+# ---------------------------------------------------------------------------
+[hooks]
+pre_start = { executable = "%BASE%/scripts/prepare.cmd", arguments = ["--env", "prod"], stdout = "%BASE%/logs/pre-start.log", stderr = "NUL", timeout_secs = 30 }
+# post_start = { executable = "notify.cmd", arguments = ["started"], stdout = "NUL", stderr = "NUL", timeout_secs = 60 }
+# pre_stop = { executable = "drain.cmd", arguments = [], stdout = "NUL", stderr = "NUL", timeout_secs = 60 }
+post_stop = { executable = "%BASE%/scripts/cleanup.cmd", arguments = [], stdout = "NUL", stderr = "NUL", timeout_secs = 30 }

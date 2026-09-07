@@ -1,0 +1,8 @@
+# Same schema as minimal.toml, in YAML.
+service:
+  id: myapp
+process:
+  executable: app.exe
+  arguments: ["--port", "8080"]
+env:
+  DATABASE_URL: postgres://user:pass@localhost/db

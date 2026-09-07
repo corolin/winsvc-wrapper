@@ -1,0 +1,49 @@
+<service>
+  <!-- Windows 服务唯一标识符 -->
+  <id>DeepSeekHarness</id>
+  <!-- 显示在服务列表中的名称 -->
+  <name>DeepSeek Harness Agent Service</name>
+  <!-- 服务描述 -->
+  <description>DeepSeek Harness Web UI and AI Agent Service</description>
+
+  <!-- 启动程序：Node.js -->
+  <executable>node.exe</executable>
+  <!-- 启动参数：加载 browse-picker patch 启用网页内文件选择器，解决后台服务无桌面弹窗的问题 -->
+  <arguments>apps/cli/lib/bin.js web --patch service/browse-picker.patch.yml --no-open --port 3080</arguments>
+
+  <!-- 工作目录：项目根目录 -->
+  <workingdirectory>%BASE%\..</workingdirectory>
+
+  <!-- 日志配置 -->
+  <logpath>%BASE%\logs</logpath>
+  <log mode="roll-by-size-time">
+    <sizeThreshold>10240</sizeThreshold>
+    <pattern>yyyyMMdd</pattern>
+    <autoRollAtTime>00:00:00</autoRollAtTime>
+    <zipOlderThanNumDays>7</zipOlderThanNumDays>
+    <zipDateFormat>yyyyMMdd</zipDateFormat>
+  </log>
+
+  <!-- 启动类型：开机自动启动 -->
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>false</delayedAutoStart>
+
+  <!-- 故障自动重启机制 -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- 环境变量设置 -->
+  <env name="NODE_ENV" value="production"/>
+
+  <!-- 服务登录账户：默认 LocalSystem。改成用指定 Windows 用户运行，填好 <user>/<password>。
+       安装时 <allowservicelogon>true</allowservicelogon> 会自动授予该账户"以服务方式登录"权限。
+       本地账户 domain 可用 "."，域账户填域名或留空用本机。
+       注意：Windows 服务始终运行在 Session 0，无法在桌面会话中弹窗交互（浏览文件选择等仍需 browse-picker patch）。 -->
+  <serviceaccount>
+    <domain>.</domain>
+    <user>YourUsername</user>
+    <password>YourPassword</password>
+    <allowservicelogon>true</allowservicelogon>
+  </serviceaccount>
+</service>

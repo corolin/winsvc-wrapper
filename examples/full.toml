@@ -1,0 +1,63 @@
+# A kitchen-sink example exercising every rsw feature.
+# Use as a starting point and delete what you don't need.
+
+[service]
+id = "myapp"
+name = "My Awesome App"
+description = "Rust driven backend service"
+start_type = "delayed"            # auto-start after boot, once essentials settle
+dependencies = ["Tcpip"]
+failure_reset_after = "1 day"
+
+[service.account]
+# Omit the whole section to run as LocalSystem.
+username = "NT AUTHORITY\\NetworkService"
+password = ""                     # virtual accounts need no password
+allow_logon_as_service = false    # already held by virtual accounts
+
+[process]
+executable = "app.exe"            # sits next to this config; bare names hit PATH
+arguments = ["--port", "8080", "--mode", "prod"]
+working_dir = "data"              # relative to the config dir
+stop_signal = "ctrl-c"            # ctrl_c | ctrl_break | kill
+stop_timeout_secs = 20
+priority = "normal"
+success_exit_codes = [0, 2]       # 2 = app's "clean maintenance exit"
+
+[process.restart]
+policy = "on-failure"
+delay_secs = 5
+backoff = true                    # 5 → 10 → 20 … capped at 60s
+max_retries = 5                   # then SCM on_failure takes over
+
+[env]
+DATABASE_URL = "postgres://user:pass@localhost/db"
+CONFIG_DIR = "%BASE%/conf"        # %BASE% = config file directory
+
+[[on_failure]]
+action = "restart"
+delay = "10 sec"
+
+[[on_failure]]
+action = "reboot"
+delay = "1 min"
+
+[logging]
+dir = "logs"
+mode = "roll-by-size"
+size_threshold_mb = 20
+keep_files = 14
+merge_stderr = false
+
+[[download]]
+from = "https://example.com/agent/agent.jar"
+to = "runtime/agent.jar"
+fail_on_error = true
+
+[hooks]
+pre_start = { executable = "scripts/prep.cmd", stdout = "logs/prep.log", stderr = "logs/prep.err.log", timeout_secs = 30 }
+post_stop = { executable = "scripts/cleanup.cmd", stdout = "NUL", stderr = "NUL" }
+
+# [[map_drive]]
+# label = "N:"
+# unc_path = "\\\\fileserver\\share"
