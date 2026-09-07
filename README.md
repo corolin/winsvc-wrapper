@@ -1,7 +1,7 @@
 # rsw — Rust Service Wrapper
 
 [![CI](https://github.com/corolin/winsvc-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/corolin/winsvc-wrapper/actions/workflows/ci.yml)
-[License: MIT](https://github.com/corolin/winsvc-wrapper/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/corolin/winsvc-wrapper/blob/main/LICENSE)
 
 **WinSW-style declarative configuration + a native Rust runtime.** `rsw` wraps any
 executable as a Windows service: one small static binary, a TOML (or YAML) config

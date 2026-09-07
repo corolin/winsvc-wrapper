@@ -393,7 +393,13 @@ fn hooks_run_with_resolved_paths_and_expanded_args() {
     let code = wait_exit(&mut rsw, Duration::from_secs(30)).expect("rsw did not exit");
     assert_eq!(code, 0);
     let hook_log = read_log(&setup, "hook.log");
-    let base = setup.dir.to_string_lossy().into_owned();
+    // rsw canonicalizes %BASE% (dunce), so on runners whose %TEMP% is an 8.3
+    // short path (RUNNER~1) the test's raw temp_dir won't match — compare
+    // against the canonical form.
+    let base = dunce::canonicalize(&setup.dir)
+        .unwrap_or_else(|_| setup.dir.clone())
+        .to_string_lossy()
+        .into_owned();
     assert!(
         hook_log.contains(&format!("HOOK-pre-{base}")),
         "pre-start hook (relative path + %BASE% arg) did not run: {hook_log}"
