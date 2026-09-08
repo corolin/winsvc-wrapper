@@ -17,7 +17,7 @@ use anyhow::{Context as _, bail};
 use chrono::{DateTime, Utc};
 use ureq::Agent;
 
-use crate::config::{AuthConfig, AuthKind, DownloadConfig};
+use crate::config::{AuthConfig, AuthKind, DownloadConfig, DownloadTlsConfig};
 use crate::logging::LogSink;
 
 pub fn run_downloads(
@@ -50,7 +50,7 @@ fn download_one(d: &DownloadConfig, working_dir: &Path, sink: &LogSink) -> anyho
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    let agent = build_agent(d.proxy.as_deref())?;
+    let agent = build_agent(d.proxy.as_deref(), d.tls.as_ref())?;
     let mut request = agent.get(&d.from);
     if let Some(auth) = &d.auth {
         request = request.header("Authorization", &basic_auth_header(auth));
@@ -117,13 +117,55 @@ fn download_one(d: &DownloadConfig, working_dir: &Path, sink: &LogSink) -> anyho
     Ok(())
 }
 
-fn build_agent(proxy: Option<&str>) -> anyhow::Result<Agent> {
+fn build_agent(proxy: Option<&str>, tls: Option<&DownloadTlsConfig>) -> anyhow::Result<Agent> {
     let mut builder = ureq::config::Config::builder();
     if let Some(proxy_url) = proxy {
         let proxy = ureq::Proxy::new(proxy_url).context("invalid proxy URL")?;
         builder = builder.proxy(Some(proxy));
     }
+    if let Some(t) = tls {
+        builder = builder.tls_config(load_tls_config(t)?);
+    }
     Ok(builder.build().new_agent())
+}
+
+/// TLS setup for one download entry. `ca` replaces the root set used to
+/// verify the *server* certificate (verification is never disabled);
+/// `client_cert` + `client_key` present this client for mTLS. File problems
+/// surface as errors here so they flow through the entry's `fail_on_error`
+/// semantics like any other download failure.
+fn load_tls_config(t: &DownloadTlsConfig) -> anyhow::Result<ureq::tls::TlsConfig> {
+    let mut builder = ureq::tls::TlsConfig::builder();
+    if let Some(ca) = &t.ca {
+        let roots = load_cert_chain(ca).with_context(|| format!("download tls.ca: {ca}"))?;
+        builder = builder.root_certs(ureq::tls::RootCerts::new_with_certs(&roots));
+    }
+    if let (Some(cert), Some(key)) = (&t.client_cert, &t.client_key) {
+        let chain =
+            load_cert_chain(cert).with_context(|| format!("download tls.client_cert: {cert}"))?;
+        let key_bytes = fs::read(key).with_context(|| format!("download tls.client_key: {key}"))?;
+        let key = ureq::tls::PrivateKey::from_pem(&key_bytes).map_err(|e| {
+            anyhow::anyhow!("download tls.client_key: {key}: {e} (expected an unencrypted PEM key: PKCS8 `PRIVATE KEY`, `RSA PRIVATE KEY`, or `EC PRIVATE KEY`)")
+        })?;
+        builder = builder.client_cert(Some(ureq::tls::ClientCert::new_with_certs(&chain, key)));
+    }
+    Ok(builder.build())
+}
+
+/// Every PEM certificate in the file (a CA bundle may hold several); the
+/// first key, CSR, etc. sections are ignored.
+fn load_cert_chain(path: &str) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
+    let bytes = fs::read(path).with_context(|| format!("reading {path}"))?;
+    let mut certs = Vec::new();
+    for item in ureq::tls::parse_pem(&bytes) {
+        if let ureq::tls::PemItem::Certificate(c) = item.context("parsing PEM certificates")? {
+            certs.push(c.to_owned());
+        }
+    }
+    if certs.is_empty() {
+        bail!("no PEM certificates found in {path}");
+    }
+    Ok(certs)
 }
 
 fn basic_auth_header(auth: &AuthConfig) -> String {
@@ -211,6 +253,69 @@ mod tests {
         assert_eq!(base64(b"foob"), "Zm9vYg==");
         assert_eq!(base64(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn load_tls_config_accepts_ca_bundle_and_mtls_pair() {
+        let t = DownloadTlsConfig {
+            ca: Some(fixture("tls-bundle.pem")),
+            client_cert: Some(fixture("tls-client.pem")),
+            client_key: Some(fixture("tls-client-key.pem")),
+        };
+        let cfg = load_tls_config(&t).unwrap();
+        assert!(cfg.client_cert().is_some(), "mTLS pair must be configured");
+    }
+
+    #[test]
+    fn load_tls_config_rejects_missing_and_garbage_files() {
+        let garbage = tempfile::tempdir().unwrap();
+        let garbage_ca = garbage.path().join("garbage.pem");
+        fs::write(&garbage_ca, b"not a pem").unwrap();
+
+        let none = || DownloadTlsConfig {
+            ca: None,
+            client_cert: None,
+            client_key: None,
+        };
+        // NB: a PEM-looking but crypto-invalid key is NOT caught here — ureq
+        // only looks for the PEM section — it fails later at the TLS
+        // handshake. Cases below all fail at load time.
+        let cases = [
+            (
+                DownloadTlsConfig {
+                    ca: Some(fixture("no-such-file.pem")),
+                    ..none()
+                },
+                "tls.ca",
+            ),
+            (
+                DownloadTlsConfig {
+                    ca: Some(garbage_ca.to_string_lossy().into_owned()),
+                    ..none()
+                },
+                "tls.ca",
+            ),
+            (
+                // realistic mistake: client_key pointing at a certificate file
+                DownloadTlsConfig {
+                    client_cert: Some(fixture("tls-client.pem")),
+                    client_key: Some(fixture("tls-bundle.pem")),
+                    ..none()
+                },
+                "tls.client_key",
+            ),
+        ];
+        for (t, needle) in &cases {
+            let err = load_tls_config(t).unwrap_err().to_string();
+            assert!(
+                err.contains(needle),
+                "error must name the offending field ({needle}): {err}"
+            );
+        }
     }
 
     #[test]

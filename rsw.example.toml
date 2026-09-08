@@ -326,6 +326,32 @@ fail_on_error = false
 # auth = { kind = "basic", user = "deploy", password = "secret" }
 
 # ---------------------------------------------------------------------------
+# EN: TLS options for THIS download entry. `ca` replaces the root set used
+#     to verify the *server* certificate (a CA bundle with several certs is
+#     fine) — certificate verification is NEVER disabled, there is no
+#     insecure option. `client_cert` + `client_key` enable mTLS (the server
+#     asks the client to identify itself); they must be set together. PEM
+#     only: certificates as `CERTIFICATE` blocks, the key unencrypted as
+#     PKCS8 `PRIVATE KEY` (recommended), `RSA PRIVATE KEY`, or
+#     `EC PRIVATE KEY`. Paths support %BASE%; the service account (SYSTEM by
+#     default) must be able to read the files. lite builds (rsw --version
+#     shows "(lite)") have no download support at all: entries warn and are
+#     skipped, or abort the start when fail_on_error = true.
+# 中文：本条下载的 TLS 选项。`ca` 替换验证**服务器**证书所用的根证书集
+#     （可以放多张证书的 CA bundle）——证书验证**永不关闭**，不存在跳过
+#     校验的选项。`client_cert` + `client_key` 启用 mTLS（服务器要求客户端
+#     出示身份）；两者必须成对出现。仅支持 PEM：证书为 `CERTIFICATE` 块，
+#     私钥为未加密的 PKCS8 `PRIVATE KEY`（推荐）、`RSA PRIVATE KEY` 或
+#     `EC PRIVATE KEY`。路径支持 %BASE%；服务账户（默认 SYSTEM）必须能
+#     读取这些文件。lite 构建（rsw --version 显示 "(lite)"）完全不支持
+#     下载：条目记警告后跳过；若 fail_on_error = true 则中止启动。
+# ---------------------------------------------------------------------------
+[download.tls]
+# ca = "%BASE%/certs/internal-root.pem"
+# client_cert = "%BASE%/certs/client.pem"
+# client_key = "%BASE%/certs/client-key.pem"
+
+# ---------------------------------------------------------------------------
 # EN: map a network drive letter to a UNC share before the child starts.
 # 中文：在子进程启动前把网络驱动器号映射到 UNC 共享路径。
 # ---------------------------------------------------------------------------

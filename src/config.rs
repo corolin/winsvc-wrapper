@@ -334,6 +334,22 @@ pub struct DownloadConfig {
     pub proxy: Option<String>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub tls: Option<DownloadTlsConfig>,
+}
+
+/// TLS knobs for a single `[[download]]` entry. `ca` replaces the roots used
+/// to verify the *server* certificate (verification is never disabled);
+/// `client_cert` + `client_key` enable mTLS. Paths support `%BASE%`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadTlsConfig {
+    #[serde(default)]
+    pub ca: Option<String>,
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    #[serde(default)]
+    pub client_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +606,14 @@ impl Config {
                 errors.push(format!("[env] invalid value for `{k}`"));
             }
         }
+        for d in &self.download {
+            let Some(tls) = &d.tls else { continue };
+            if tls.client_cert.is_some() != tls.client_key.is_some() {
+                errors.push(
+                    "[download] tls.client_cert and tls.client_key must be set together".into(),
+                );
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -806,6 +830,20 @@ impl Resolved {
                 .to_string_lossy()
                 .into_owned();
             d.from = expand_vars(&d.from, &base);
+            if let Some(tls) = &mut d.tls {
+                for field in [
+                    tls.ca.as_mut(),
+                    tls.client_cert.as_mut(),
+                    tls.client_key.as_mut(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    *field = resolve_path_field(&expand_vars(field, &base), &base)
+                        .to_string_lossy()
+                        .into_owned();
+                }
+            }
         }
 
         let hooks = &mut self.cfg.hooks;
@@ -1031,6 +1069,67 @@ on_failure:
         assert_eq!(cfg.process.restart.policy, RestartPolicy::Always);
         assert_eq!(cfg.on_failure[0].action, FailureAction::Restart);
         assert_eq!(cfg.on_failure[0].delay, 5_000);
+    }
+
+    #[test]
+    fn download_tls_parsing_and_pair_validation() {
+        let base = r#"
+[service]
+id = "myapp"
+
+[process]
+executable = "app.exe"
+
+[[download]]
+from = "https://example.com/app.jar"
+to = "app.jar"
+"#;
+        let full = format!(
+            "{base}\n[download.tls]\nca = \"root.pem\"\nclient_cert = \"client.pem\"\nclient_key = \"client-key.pem\"\n"
+        );
+        let cfg: Config = Config::parse(ConfigFormat::Toml, &full, Path::new("app.toml")).unwrap();
+        cfg.validate().unwrap();
+        let tls = cfg.download[0].tls.as_ref().unwrap();
+        assert_eq!(tls.ca.as_deref(), Some("root.pem"));
+        assert_eq!(tls.client_cert.as_deref(), Some("client.pem"));
+        assert_eq!(tls.client_key.as_deref(), Some("client-key.pem"));
+
+        for incomplete in [
+            format!("{base}\n[download.tls]\nclient_cert = \"client.pem\"\n"),
+            format!("{base}\n[download.tls]\nclient_key = \"client-key.pem\"\n"),
+        ] {
+            let cfg: Config =
+                Config::parse(ConfigFormat::Toml, &incomplete, Path::new("app.toml")).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("client_cert and tls.client_key must be set together"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_tls_unknown_field_rejected() {
+        let text = r#"
+[service]
+id = "myapp"
+
+[process]
+executable = "app.exe"
+
+[[download]]
+from = "https://example.com/app.jar"
+to = "app.jar"
+
+[download.tls]
+insecure = true
+"#;
+        let err = Config::parse(ConfigFormat::Toml, text, Path::new("app.toml"))
+            .expect_err("deny_unknown_fields must reject tls.insecure");
+        assert!(
+            err.to_string().contains("insecure"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
