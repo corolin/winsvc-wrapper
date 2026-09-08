@@ -1,2 +1,5 @@
 /target
 .zcode/
+
+# lite build output (cargo --target-dir target-lite)
+/target-lite/

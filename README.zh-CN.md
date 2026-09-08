@@ -29,13 +29,21 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
 > rsw start myapp.toml
 ```
 
-预编译的 `rsw.exe`（约 3 MB，静态链接，x86_64）可在
+预编译的 `rsw.exe`（静态链接，x86_64）可在
 [Releases 页面](https://github.com/corolin/winsvc-wrapper/releases)下载，
-也可自行 `cargo build --release --bin rsw` 构建。
+也可自行 `cargo build --release --bin rsw` 构建。Release 附两种变体
+（`rsw --version` 可辨认），校验和见 `SHA256SUMS.txt`：
+
+- `…-full.zip`（约 3 MB）— 全功能；
+- `…-lite.zip`（约 1.6 MB）— 完全离线的精简 wrapper，仅去掉 `[[download]]`
+  （自行构建：`cargo build --release --no-default-features --bin rsw`）。
+  lite 二进制遇到含 `[[download]]` 的配置：每条记警告后跳过；声明了
+  `fail_on_error = true` 的条目会中止启动；`rsw validate` 只提示不报错。
 
 ## 特性
 
-- **零运行时依赖** — 不需要 .NET / JVM，单个约 3 MB 的 `rsw.exe`。
+- **零运行时依赖** — 不需要 .NET / JVM，单个约 3 MB 的 `rsw.exe`
+  （另有约 1.6 MB 的离线 **lite** 变体）。
 - **声明式 + sidecar 约定** — 把 `rsw.exe` 改名为 `app.exe`，它自动读取
   `app.toml` / `app.yaml` / `app.yml`。
 - **子进程监督** — 管道捕获 stdout/stderr（子进程从不直接持有日志句柄，杜绝
@@ -45,7 +53,8 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
   → 关闭窗口 → 超时 → TerminateProcess → Job Object 树杀。孙进程绝不残留。
 - **对齐 WinSW 功能面** — 启动类型（含延迟启动）、依赖服务、服务账户
   （自动授予 *SeServiceLogonRight*）、`on_failure` 恢复动作、pre/post 钩子、
-  启动前下载、网络盘映射、SDDL 安全描述符、免重装的 `refresh`。
+  启动前下载（支持自定义 CA 与 mTLS PEM——证书验证永不关闭）、网络盘映射、
+  SDDL 安全描述符、免重装的 `refresh`。
 - **TOML 与 YAML 双格式** — 同一 schema，按扩展名识别。
 
 ## 命令行

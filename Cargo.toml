@@ -16,9 +16,17 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
 thiserror = "2.0.20"
 toml = { version = "1.1.5", default-features = false, features = ["parse", "display", "serde", "std"] }
-ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
+ureq = { version = "3.4.1", optional = true, default-features = false, features = ["rustls"] }
 windows = { version = "0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_NetworkManagement_WNet", "Win32_Security_Authentication_Identity", "Win32_System_Services", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_Time", "Win32_UI_Shell"] }
 windows-service = "0.8.1"
+
+[features]
+# `download` pulls the whole HTTP(S) stack (ureq + rustls + ring, ~1 MB of the
+# binary). Lite builds (--no-default-features) ship without it: [[download]]
+# entries then warn and are skipped (or abort the start when the entry sets
+# fail_on_error = true). See docs in rsw.example.toml.
+default = ["download"]
+download = ["dep:ureq"]
 
 [dev-dependencies]
 tempfile = "3"

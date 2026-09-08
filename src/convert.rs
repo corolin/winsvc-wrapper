@@ -560,6 +560,10 @@ fn generate(w: &WinswConfig, source: &Path) -> String {
         .filter(|(n, _)| n == "download")
         .map(|(_, a)| a)
         .collect();
+    #[cfg(not(feature = "download"))]
+    if !downloads.is_empty() {
+        e.warn("this lite build has no download support; the generated [[download]] entries will be skipped when the config runs (entries with fail_on_error = true abort the start).");
+    }
     for d in downloads {
         e.line("");
         e.line("[[download]]");

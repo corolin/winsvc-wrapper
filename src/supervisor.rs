@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crate::config::{Resolved, RestartPolicy};
+#[cfg(feature = "download")]
 use crate::download::run_downloads;
 use crate::hooks::run_hook;
 use crate::logging::{Channel, LogSink};
@@ -68,9 +69,27 @@ pub fn supervise(
         return ServiceExit::StartFailed(None);
     }
 
+    #[cfg(feature = "download")]
     if let Err(e) = run_downloads(&r.cfg.download, &working_dir, sink) {
         sink.error(&format!("{e:#}"));
         return ServiceExit::StartFailed(None);
+    }
+    // Lite builds ship without the HTTP(S) stack. Each [[download]] entry
+    // degrades exactly like a failed download: warn and continue, or abort
+    // the start when the entry opted into fail_on_error.
+    #[cfg(not(feature = "download"))]
+    for d in &r.cfg.download {
+        if d.fail_on_error {
+            sink.error(&format!(
+                "download {} -> {} is not supported in this lite build (fail_on_error = true); not starting",
+                d.from, d.to
+            ));
+            return ServiceExit::StartFailed(None);
+        }
+        sink.warn(&format!(
+            "skipping download {} -> {}: not supported in this lite build",
+            d.from, d.to
+        ));
     }
     map_drives(&r.cfg.map_drive, sink);
 

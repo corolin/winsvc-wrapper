@@ -4,10 +4,17 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// Build flavor shown in `--version`: full ships the download feature, lite
+/// (built with --no-default-features) is the offline wrapper without it.
+#[cfg(feature = "download")]
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (full)");
+#[cfg(not(feature = "download"))]
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (lite)");
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rsw",
-    version,
+    version = VERSION,
     about = "rsw — Rust Service Wrapper: run any executable as a Windows service",
     after_help = "The config path is optional when rsw.exe is renamed (e.g. app.exe picks up app.toml)."
 )]

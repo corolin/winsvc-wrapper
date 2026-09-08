@@ -34,9 +34,18 @@ Grab a prebuilt `rsw.exe` from the
 [releases page](https://github.com/corolin/winsvc-wrapper/releases), or build
 it yourself with `cargo build --release --bin rsw`.
 
+Two release flavors ship side by side (see `rsw --version`): **full** (~3 MB)
+with everything below, and **lite** (~1.6 MB, built with
+`--no-default-features`) for fully offline machines — it drops only the
+`[[download]]` feature. A lite binary facing a config with `[[download]]`
+entries logs a warning per entry and skips them (entries with
+`fail_on_error = true` abort the start); `rsw validate` prints the same note
+without failing.
+
 ## Highlights
 
-- **Zero runtime dependencies** — no .NET, no JVM; a single ~3 MB `rsw.exe`.
+- **Zero runtime dependencies** — no .NET, no JVM; a single ~3 MB `rsw.exe`
+  (a ~1.6 MB offline **lite** flavor is built from the same source).
 - **Declarative & sidecar-friendly** — rename `rsw.exe` to `app.exe` and it picks
   up `app.toml` / `app.yaml` / `app.yml` automatically.
 - **Supervised children** — stdout/stderr capture through pipes (no locked log
@@ -47,7 +56,8 @@ it yourself with `cargo build --release --bin rsw`.
   TerminateProcess → job-object tree kill. Grandchildren never survive.
 - **WinSW feature parity** — start types incl. delayed, dependencies, service
   accounts with automatic *SeServiceLogonRight* grant, `on_failure` recovery
-  actions, pre/post hooks, startup downloads, drive mapping, SDDL security
+  actions, pre/post hooks, startup downloads (with custom CA / mTLS PEM
+  options — verification is never disabled), drive mapping, SDDL security
   descriptors, `refresh` without reinstall.
 - **Both config languages** — TOML and YAML, same schema, detected by extension.
 
@@ -138,6 +148,13 @@ fail_on_error = false
 # proxy = "http://user:pass@host:port"
 # auth = { kind = "basic", user = "u", password = "p" }
 
+# [download.tls]                  # per-entry TLS (full build only)
+# ca = "internal-root.pem"        # custom root(s) for server verification;
+#                                 # bundles with several certs are fine.
+#                                 # Verification is never disabled.
+# client_cert = "client.pem"      # mTLS pair — must be set together; PEM,
+# client_key = "client-key.pem"   # unencrypted PKCS8 recommended.
+
 [[map_drive]]                     # WNetAddConnection2 before the child starts
 label = "N:"
 unc_path = "\\\\fileserver\\share"
@@ -208,8 +225,13 @@ scripts\test-runtimes.ps1                    # node/python/java smoke (no admin)
 ```
 
 Prebuilt Windows binaries are attached to each
-[release](https://github.com/corolin/winsvc-wrapper/releases) (~3 MB, static,
-x86_64).
+[release](https://github.com/corolin/winsvc-wrapper/releases) (static, x86_64),
+in two flavors with SHA-256 checksums in `SHA256SUMS.txt`:
+
+- `rsw-<tag>-x86_64-pc-windows-msvc-full.zip` (~3 MB) — all features;
+- `rsw-<tag>-x86_64-pc-windows-msvc-lite.zip` (~1.6 MB) — offline wrapper without
+  `[[download]]` (build it yourself with
+  `cargo build --release --no-default-features --bin rsw`).
 
 ## License
 

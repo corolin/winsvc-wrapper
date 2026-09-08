@@ -51,6 +51,11 @@ fn spawn_rsw(setup: &Setup, creation: u32) -> std::process::Child {
         .arg("app.toml")
         .current_dir(&setup.dir)
         .creation_flags(creation)
+        // stdin must NOT be inherited: under parallel CREATE_NEW_CONSOLE churn
+        // an inherited pipe stdin combined with a fresh console can stall the
+        // child's early process init (seen as 1-thread/0-CPU rsw instances).
+        // SCM-started services have no stdin either — this matches production.
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -483,3 +488,70 @@ fn stop_arguments_without_stop_executable_use_main_exe() {
 // Silence unused warnings for helper path used conditionally by future tests.
 #[allow(dead_code)]
 fn _touch(_: &Path) {}
+
+// --- lite build ([[download]] degradation) --------------------------------
+// These compile only in the --no-default-features test run (CI), where the
+// binary has no download support and the degradation paths are live.
+#[cfg(not(feature = "download"))]
+mod lite_download {
+    use super::*;
+
+    #[test]
+    fn lite_validate_warns_but_exits_zero() {
+        let setup = setup(concat!(
+            "arguments = [\"echo\", \"x\"]\n\n",
+            "[[download]]\nfrom = \"https://example.com/app.jar\"\nto = \"app.jar\"\n"
+        ));
+        let output = Command::new(RSW)
+            .arg("validate")
+            .arg("app.toml")
+            .current_dir(&setup.dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "validate must not fail on a lite build"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no download support"),
+            "validate must warn about [[download]]: {stderr}"
+        );
+    }
+
+    #[test]
+    fn lite_run_skips_download_and_starts_child() {
+        let setup = setup(concat!(
+            "arguments = [\"echo\", \"LITE-OK\"]\n\n",
+            "[[download]]\nfrom = \"https://example.com/app.jar\"\nto = \"app.jar\"\n"
+        ));
+        let mut rsw = spawn_rsw(&setup, CREATE_NEW_CONSOLE);
+        let code = wait_exit(&mut rsw, Duration::from_secs(30)).expect("rsw did not exit");
+        assert_eq!(code, 0);
+        let wrapper = read_log(&setup, "app.wrapper.log");
+        assert!(
+            wrapper.contains("skipping download https://example.com/app.jar"),
+            "wrapper log must note the skipped download: {wrapper}"
+        );
+        let out = read_log(&setup, "app.out.log");
+        assert!(out.contains("LITE-OK"), "child must still run: {out}");
+    }
+
+    #[test]
+    fn lite_run_aborts_when_fail_on_error() {
+        let setup = setup(concat!(
+            "arguments = [\"echo\", \"MUST-NOT-RUN\"]\n\n",
+            "[[download]]\nfrom = \"https://example.com/app.jar\"\nto = \"app.jar\"\nfail_on_error = true\n"
+        ));
+        let mut rsw = spawn_rsw(&setup, CREATE_NEW_CONSOLE);
+        let code = wait_exit(&mut rsw, Duration::from_secs(30)).expect("rsw did not exit");
+        assert_ne!(code, 0, "fail_on_error must abort the start");
+        let wrapper = read_log(&setup, "app.wrapper.log");
+        assert!(
+            wrapper.contains("not supported in this lite build"),
+            "wrapper log must explain the abort: {wrapper}"
+        );
+        let out = read_log(&setup, "app.out.log");
+        assert!(!out.contains("MUST-NOT-RUN"), "child must not start: {out}");
+    }
+}

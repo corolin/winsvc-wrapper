@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod control;
 mod convert;
+#[cfg(feature = "download")]
 mod download;
 mod elevation;
 mod hooks;
@@ -109,6 +110,14 @@ fn load_resolved(explicit: Option<&Path>) -> anyhow::Result<config::Resolved> {
 
 fn cmd_validate(explicit: Option<&Path>) -> anyhow::Result<()> {
     let r = load_resolved(explicit)?;
+    #[cfg(not(feature = "download"))]
+    if !r.cfg.download.is_empty() {
+        eprintln!(
+            "rsw: note — config contains [[download]], but this lite build has no download \
+             support; entries will be skipped (entries with fail_on_error = true abort the start). \
+             Use the -full build or rebuild with --features download."
+        );
+    }
     println!(
         "{}",
         toml::to_string_pretty(&r.cfg).context("serializing the parsed config")?
