@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # Same e2e concurrency cap as CI (see ci.yml for the loader-stall rationale).
+  RUST_TEST_THREADS: "4"
+
 jobs:
   release:
     runs-on: windows-latest
@@ -14,12 +18,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build (release)
+      - name: Test before packaging
+        run: cargo test --all-targets
+      # Distinct target dirs so the lite build cannot overwrite the full exe.
+      - name: Build (release, full)
         run: cargo build --release --bin rsw
+      - name: Build (release, lite)
+        run: cargo build --release --no-default-features --bin rsw --target-dir target-lite
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path target/release/rsw.exe -DestinationPath rsw-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Compress-Archive -Path target/release/rsw.exe -DestinationPath "rsw-$tag-x86_64-pc-windows-msvc-full.zip"
+          Compress-Archive -Path target-lite/release/rsw.exe -DestinationPath "rsw-$tag-x86_64-pc-windows-msvc-lite.zip"
+          Get-FileHash -Algorithm SHA256 rsw-*.zip | ForEach-Object { "{0}  {1}" -f $_.Hash, (Split-Path $_.Path -Leaf) } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: rsw-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+          files: |
+            rsw-*-full.zip
+            rsw-*-lite.zip
+            SHA256SUMS.txt

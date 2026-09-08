@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 3 * * 1" # weekly: catch new advisories in the locked dependency set
 
 env:
   CARGO_TERM_COLOR: always
+  # The run_e2e suite spawns one rsw per test, each with CREATE_NEW_CONSOLE.
+  # At full parallelism (one thread per core) that occasionally stalls inside
+  # the Windows loader (process stuck pre-main in an Executive wait — an OS
+  # initialization issue, not rsw code); 4 concurrent test threads were
+  # verified flake-free over repeated local runs. Keep CI at that cap.
+  RUST_TEST_THREADS: "4"
 
 jobs:
   ci:
@@ -19,14 +27,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
-      - name: Clippy
+      - name: Clippy (full)
         run: cargo clippy --all-targets -- -D warnings
-      - name: Test
+      - name: Test (full)
         run: cargo test --all-targets
-      - name: Build (release)
+      - name: Build (release, full)
         run: cargo build --release --bin rsw
-      - name: Upload binary
+      - name: Upload binary (full)
         uses: actions/upload-artifact@v4
         with:
           name: rsw-${{ runner.os }}
           path: target/release/rsw.exe
+      - name: Clippy (lite)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: Test (lite)
+        run: cargo test --no-default-features --all-targets
+      - name: Build (release, lite)
+        run: cargo build --release --no-default-features --bin rsw
+      - name: Upload binary (lite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsw-${{ runner.os }}-lite
+          path: target/release/rsw.exe
+      - name: Dependency audit (RustSec)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
