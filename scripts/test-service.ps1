@@ -24,6 +24,7 @@ start_type = "manual"
 [process]
 executable = "$($testChild.Replace('\', '/'))"
 arguments = ["graceful", "200"]
+stop_signal = "ctrl-c"    # the default is "kill"; the GRACEFUL-DONE check below needs a real signal
 stop_timeout_secs = 10
 
 [[on_failure]]
@@ -87,6 +88,8 @@ try {
     Must ((Get-Service 'rsw-scm-test').Status -eq 'Stopped') 'service Stopped'
     $out = Get-Content (Join-Path $dir 'logs\scm.out.log') -Raw
     Must ($out -match 'GRACEFUL-DONE') 'child shut down gracefully via SCM stop'
+    $wl = Get-Content (Join-Path $dir 'logs\scm.wrapper.log') -Raw
+    Must ($wl -match 'sent CtrlC to child') 'rsw delivered the ctrl event itself (no console broadcast from outside)'
 
     Step 'refresh'
     (Get-Content $cfg -Raw).Replace('name = "rsw SCM Test"', 'name = "rsw SCM Test (refreshed)"') | Set-Content $cfg
