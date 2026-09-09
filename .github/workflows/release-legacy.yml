@@ -1,0 +1,53 @@
+name: Release (legacy win7)
+
+# Legacy variant: Windows 7 / Server 2008 R2 SP1 x64 builds, published from
+# `v*-legacy` tags on this branch. Code is identical to the corresponding
+# main release (the branch carries only the toolchain pin and this
+# workflow); `rust-toolchain.toml` pins the dated nightly and the tier-3
+# win7 target, so std is rebuilt from source with 6.1-safe fallbacks and
+# the CRT is linked statically (see that file for the rationale).
+
+on:
+  push:
+    tags: ["v*-legacy*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUSTFLAGS: "-Ctarget-feature=+crt-static"
+  RUST_TEST_THREADS: "4"
+
+jobs:
+  release-legacy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup honors rust-toolchain.toml (dated nightly + rust-src + win7
+      # target); the explicit install makes failures legible in the log.
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Test on pinned toolchain (host)
+        run: cargo test --all-targets
+      - name: Build (release, full)
+        run: cargo build --release --bin rsw -Zbuild-std=std --target x86_64-win7-windows-msvc
+      # Distinct target dir so the lite build cannot overwrite the full exe.
+      - name: Build (release, lite)
+        run: cargo build --release --no-default-features --bin rsw -Zbuild-std=std --target x86_64-win7-windows-msvc --target-dir target-lite
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Compress-Archive -Path target/x86_64-win7-windows-msvc/release/rsw.exe -DestinationPath "rsw-$tag-x86_64-win7-windows-msvc-full.zip"
+          Compress-Archive -Path target-lite/x86_64-win7-windows-msvc/release/rsw.exe -DestinationPath "rsw-$tag-x86_64-win7-windows-msvc-lite.zip"
+          Get-FileHash -Algorithm SHA256 rsw-*.zip | ForEach-Object { "{0}  {1}" -f $_.Hash, (Split-Path $_.Path -Leaf) } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rsw-*-win7-windows-msvc-full.zip
+            rsw-*-win7-windows-msvc-lite.zip
+            SHA256SUMS.txt

@@ -1,0 +1,29 @@
+# ============================================================================
+# Legacy (Windows 7 / Server 2008 R2) build pin — ONLY effective on the
+# `legacy` branch. Main builds stay on the stable toolchain.
+#
+# The pinned nightly is required because Rust's default
+# x86_64-pc-windows-msvc target is Win10-baseline: its std imports
+# api-ms-win-crt-* (UCRT), api-ms-win-core-synch-l1-2-0 (WaitOnAddress
+# futex, Win8+) and bcryptprimitives (ProcessPrng, Win8+), none of which
+# exist on the 6.1 kernel. The tier-3 x86_64-win7-windows-msvc target
+# recompiles std from source with 6.1-safe fallbacks (semaphore parker,
+# BCryptGenRandom/RtlGenRandom), and +crt-static removes the UCRT
+# dependency. Zero source changes are needed.
+#
+# The pinned nightly is a build-time choice only: bumping the date is an
+# explicit, opt-in act (CI and this file move together). Verified on
+# Windows Server 2008 R2 SP1 x64: service install/start/stop/uninstall
+# roundtrip fully green (see docs/compat or README).
+# ============================================================================
+
+[toolchain]
+# Dated pin (NOT plain `nightly`): CI resolves this on an msvc-host rustup.
+# Local machines whose rustup default-host is not msvc must install with the
+# explicit triple: rustup toolchain install nightly-2026-09-08-x86_64-pc-windows-msvc
+#
+# NOTE: no `targets` entry on purpose — x86_64-win7-windows-msvc is tier-3
+# and never ships prebuilt rust-std; `-Zbuild-std` compiles it from
+# `rust-src` at build time (with the win7 target passed via --target).
+channel = "nightly-2026-09-08"
+components = ["rust-src"]
