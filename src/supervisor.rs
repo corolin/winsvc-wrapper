@@ -23,6 +23,12 @@ const STABLE_AFTER_SECS: u64 = 60;
 const MAX_DELAY_SECS: u64 = 60;
 const POLL: Duration = Duration::from_millis(50);
 
+/// How long to wait for the log pumps to drain after the child is gone. The
+/// child's death closes the pipe write ends, so draining is normally
+/// instantaneous; a grandchild that inherited a write end can keep the pipe
+/// open forever, so the wait is capped instead of hanging the stop.
+const PUMP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlEvent {
     Stop,
@@ -126,7 +132,7 @@ pub fn supervise(
             proc.executable,
             r.start_args()
         ));
-        pump_output(&mut child, Arc::clone(sink));
+        let pumps = pump_output(&mut child, Arc::clone(sink));
         status(StatusUpdate::Running);
         let started = Instant::now();
         run_hook(
@@ -167,6 +173,11 @@ pub fn supervise(
         };
 
         if exit != i32::MIN {
+            // The child is gone; its final output (an unterminated last line
+            // especially) only becomes readable at EOF, so drain the pumps
+            // before deciding anything — a process exit mid-write would
+            // silently drop it.
+            drain_pumps(pumps, sink);
             let code = exit as u32;
             let uptime = started.elapsed().as_secs();
             sink.info(&format!("child {pid} exited with {code} after {uptime}s"));
@@ -273,6 +284,7 @@ pub fn supervise(
             StopKind::Killed => "child was force-killed after timeout",
         };
         sink.info(&format!("{note} (code {:?})", result.code));
+        drain_pumps(pumps, sink);
         run_hook(
             r.cfg.hooks.post_stop.as_ref(),
             "post-stop",
@@ -349,35 +361,73 @@ fn sleep_cancellable(secs: u64, control_rx: &Receiver<ControlEvent>, interactive
     false
 }
 
-/// Wires the child's stdout/stderr pipes into the log sink.
-fn pump_output(child: &mut Child, sink: Arc<LogSink>) {
+/// Wires the child's stdout/stderr pipes into the log sink; returns the pump
+/// thread handles so the caller can drain them once the child is gone.
+fn pump_output(child: &mut Child, sink: Arc<LogSink>) -> Vec<std::thread::JoinHandle<()>> {
+    let mut pumps = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         let sink_out = Arc::clone(&sink);
-        std::thread::spawn(move || pump_stream(stdout, sink_out, Channel::Out));
+        pumps.push(std::thread::spawn(move || {
+            pump_stream(stdout, sink_out, Channel::Out)
+        }));
     }
     if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || pump_stream(stderr, sink, Channel::Err));
+        pumps.push(std::thread::spawn(move || {
+            pump_stream(stderr, sink, Channel::Err)
+        }));
+    }
+    pumps
+}
+
+/// Waits for the log pumps to finish after the child is gone. Detached pumps
+/// can still be mid-write when the process exits, silently dropping the final
+/// output — an unterminated last line especially, which `read_until` only
+/// delivers at EOF (i.e. after the child exits, racing our own exit path).
+fn drain_pumps(pumps: Vec<std::thread::JoinHandle<()>>, sink: &LogSink) {
+    for handle in pumps {
+        let (done, rx) = mpsc::channel::<()>();
+        let waiter = std::thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done.send(());
+        });
+        if rx.recv_timeout(PUMP_DRAIN_TIMEOUT).is_err() {
+            sink.warn(
+                "log streams did not drain in time (a grandchild may hold the pipe open); continuing",
+            );
+            break; // remaining handles drop = detached, pre-fix behavior
+        }
+        let _ = waiter.join();
     }
 }
+
+/// A stream that never emits a newline must not accumulate unbounded memory,
+/// and holding bytes until EOF would put the final drain in a direct race
+/// with process exit; cap each log "line" at MAX_LINE_CHUNK instead.
+/// Fragments of a newline-less stream become separate log lines.
+const MAX_LINE_CHUNK: usize = 64 * 1024;
 
 fn pump_stream<R: Read>(reader: R, sink: Arc<LogSink>, channel: Channel) {
     let mut reader = std::io::BufReader::new(reader);
     let mut buf = Vec::with_capacity(512);
     loop {
         buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
-            Ok(_) => {
-                if buf.last() == Some(&b'\n') {
-                    buf.pop();
-                    if buf.last() == Some(&b'\r') {
-                        buf.pop();
-                    }
-                }
-                let line = String::from_utf8_lossy(&buf);
-                sink.child_line(channel, &line);
-            }
+        let n = match (&mut reader)
+            .take(MAX_LINE_CHUNK as u64)
+            .read_until(b'\n', &mut buf)
+        {
+            Ok(n) => n,
             Err(_) => break,
+        };
+        if n == 0 {
+            break;
         }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+        }
+        let line = String::from_utf8_lossy(&buf);
+        sink.child_line(channel, &line);
     }
 }

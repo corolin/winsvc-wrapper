@@ -489,6 +489,39 @@ fn stop_arguments_without_stop_executable_use_main_exe() {
 #[allow(dead_code)]
 fn _touch(_: &Path) {}
 
+// --- log pump drain (exit-race regression, flood stress 2026-09-09) --------
+// The pumps used to be detached: `read_until` only delivers an unterminated
+// final line at EOF (= child exit), which raced rsw's own exit path and could
+// silently drop it. supervise now drains the pumps before exiting/restarting,
+// and pump_stream caps log lines at 64 KiB so newline-less floods stream to
+// disk instead of accumulating until EOF.
+#[test]
+fn unterminated_tail_line_survives_child_exit() {
+    let setup = setup("arguments = [\"echo-raw\", \"TAIL-WITHOUT-NEWLINE\"]");
+    let mut rsw = spawn_rsw(&setup, CREATE_NEW_CONSOLE);
+    let code = wait_exit(&mut rsw, Duration::from_secs(30)).expect("rsw did not exit");
+    assert_eq!(code, 0);
+    let out = read_log(&setup, "app.out.log");
+    assert!(
+        out.contains("TAIL-WITHOUT-NEWLINE"),
+        "unterminated tail must reach the log: {out:?}"
+    );
+}
+
+#[test]
+fn newline_less_flood_is_chunked_not_lost() {
+    let setup = setup("arguments = [\"flood\", \"8\", \"--no-newline\", \"--warmup-ms\", \"200\"]");
+    let mut rsw = spawn_rsw(&setup, CREATE_NEW_CONSOLE);
+    let code = wait_exit(&mut rsw, Duration::from_secs(30)).expect("rsw did not exit");
+    assert_eq!(code, 0);
+    let path = setup.dir.join("logs").join("app.out.log");
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    assert!(
+        size > 7_000_000,
+        "8 MB newline-less flood must be persisted (chunked), got {size} bytes"
+    );
+}
+
 // --- lite build ([[download]] degradation) --------------------------------
 // These compile only in the --no-default-features test run (CI), where the
 // binary has no download support and the degradation paths are live.
