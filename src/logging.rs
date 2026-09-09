@@ -294,7 +294,10 @@ impl RotatingFile {
         Ok(())
     }
 
-    /// Deletes the oldest dated files beyond `keep` for roll-by-time.
+    /// Retention for the time-based modes: keeps the newest `keep` periods.
+    /// A period is `<stem>.<period>.log` plus, in roll-by-size-time, its
+    /// numbered `.log.N` siblings — those are pruned with their period, so
+    /// old days' size-rotated files cannot pile up forever.
     fn prune_period_files(&self) {
         if self.keep < 0 {
             return;
@@ -303,15 +306,34 @@ impl RotatingFile {
             return;
         };
         let prefix = format!("{}.", self.stem);
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.starts_with(&prefix) && n.ends_with(".log"))
-            .collect();
-        names.sort(); // period names sort chronologically for common patterns
-        let excess = names.len().saturating_sub(self.keep as usize);
-        for name in names.into_iter().take(excess) {
-            let _ = std::fs::remove_file(self.dir.join(name));
+        // Period names sort chronologically for the supported tokens.
+        let mut by_period: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some((period, tail)) = rest.split_once(".log") else {
+                continue;
+            };
+            let numbered = tail
+                .strip_prefix('.')
+                .is_some_and(|n| n.parse::<u64>().is_ok());
+            if period.is_empty() || !(tail.is_empty() || numbered) {
+                continue;
+            }
+            by_period
+                .entry(period.to_string())
+                .or_default()
+                .push(entry.path());
+        }
+        let excess = by_period.len().saturating_sub(self.keep as usize);
+        for (_, files) in by_period.into_iter().take(excess) {
+            for f in files {
+                let _ = std::fs::remove_file(f);
+            }
         }
     }
 }
@@ -354,6 +376,8 @@ pub struct LogSink {
     wrapper: Option<RotatingFile>,
     /// Mirror child lines to the console (foreground `rsw run` mode).
     tee: bool,
+    /// Timestamps for wrapper events (same injectable clock as rotation).
+    clock: Clock,
 }
 
 impl LogSink {
@@ -399,6 +423,7 @@ impl LogSink {
             err,
             wrapper,
             tee,
+            clock,
         })
     }
 
@@ -423,7 +448,7 @@ impl LogSink {
 
     /// Records a wrapper lifecycle event with timestamp and level.
     pub fn event(&self, level: &str, message: &str) {
-        let ts = Clock::system().now().format("%Y-%m-%dT%H:%M:%S%:z");
+        let ts = self.clock.now().format("%Y-%m-%dT%H:%M:%S%:z");
         let line = format!("[{ts} {level:<5}] {message}");
         if let Some(w) = &self.wrapper {
             w.write_line(&line);
@@ -656,6 +681,55 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("app.out.log")).unwrap();
         assert_eq!(content, "to stdout\nto stderr\n");
         assert!(!dir.path().join("app.err.log").exists());
+    }
+
+    #[test]
+    fn size_time_prunes_numbered_files_of_old_periods() {
+        let dir = tempfile::tempdir().unwrap();
+        let start: DateTime<Local> = Local::now()
+            .date_naive()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap();
+        let (clock, cell) = Clock::fake(start);
+        let f = RotatingFile::new(
+            LogMode::RollBySizeTime,
+            dir.path().to_path_buf(),
+            "app.out".into(),
+            30, // bytes: several size rotations per day
+            "%Y%m%d".into(),
+            None,
+            2, // periods to keep
+            clock,
+        );
+        for day in 0..4 {
+            write_many(&f, 8, &format!("day{day}"));
+            *cell.lock().unwrap() = (start + chrono::Duration::days(day + 1)).with_timezone(&Local);
+        }
+        let periods: std::collections::BTreeSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter_map(|n| {
+                n.strip_prefix("app.out.")
+                    .and_then(|r| r.split_once(".log"))
+                    .map(|(p, _)| p.to_string())
+            })
+            .collect();
+        assert_eq!(
+            periods.len(),
+            2,
+            "only the newest 2 periods (live + numbered files) may remain: {periods:?}"
+        );
+        let newest_numbered = dir.path().join(format!(
+            "app.out.{}.log.1",
+            (start + chrono::Duration::days(3)).format("%Y%m%d")
+        ));
+        assert!(
+            newest_numbered.is_file(),
+            "numbered files of kept periods must survive"
+        );
     }
 
     #[test]

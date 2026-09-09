@@ -176,8 +176,9 @@ pub struct ProcessConfig {
     pub stop_timeout_secs: u64,
     #[serde(default)]
     pub priority: Priority,
-    /// Create the child without a console window (default true — service
-    /// children have no business popping up consoles).
+    /// Accepted for WinSW compatibility only. rsw children always share the
+    /// wrapper's hidden console (a separate `CREATE_NO_WINDOW` console would
+    /// make ctrl events undeliverable), so this flag has no effect.
     #[serde(default = "default_true")]
     #[serde(deserialize_with = "serde_bool_str")]
     pub hide_window: bool,
@@ -336,6 +337,11 @@ pub struct DownloadConfig {
     pub auth: Option<AuthConfig>,
     #[serde(default)]
     pub tls: Option<DownloadTlsConfig>,
+    /// Whole-request budget (connect + headers + body) in seconds, default
+    /// 120. A stalled server must not wedge the service start: the SCM only
+    /// waits as long as rsw keeps reporting progress.
+    #[serde(default = "default_download_timeout")]
+    pub timeout_secs: u64,
 }
 
 /// TLS knobs for a single `[[download]]` entry. `ca` replaces the roots used
@@ -472,6 +478,9 @@ fn default_nul() -> String {
 fn default_hook_timeout() -> u64 {
     60
 }
+fn default_download_timeout() -> u64 {
+    120
+}
 
 // ---------------------------------------------------------------------------
 // Loading
@@ -607,6 +616,12 @@ impl Config {
             }
         }
         for d in &self.download {
+            if d.timeout_secs == 0 {
+                errors.push(format!(
+                    "[download] timeout_secs must be > 0 (entry {})",
+                    d.from
+                ));
+            }
             let Some(tls) = &d.tls else { continue };
             if tls.client_cert.is_some() != tls.client_key.is_some() {
                 errors.push(
@@ -961,6 +976,21 @@ impl Resolved {
     }
 }
 
+/// Masks the password in `scheme://user:pass@host` URLs (proxy settings);
+/// anything else is returned unchanged.
+pub fn redact_url_password(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let Some((userinfo, host)) = rest.split_once('@') else {
+        return url.to_string();
+    };
+    match userinfo.split_once(':') {
+        Some((user, _pass)) => format!("{scheme}://{user}:********@{host}"),
+        None => url.to_string(),
+    }
+}
+
 /// Translates a .NET-style DateTime pattern (yyyy, MM, dd, HH, mm, ss tokens)
 /// into a chrono format string. Returns None when unsupported tokens appear.
 pub fn translate_time_pattern(pattern: &str) -> Option<String> {
@@ -1089,6 +1119,7 @@ to = "app.jar"
         );
         let cfg: Config = Config::parse(ConfigFormat::Toml, &full, Path::new("app.toml")).unwrap();
         cfg.validate().unwrap();
+        assert_eq!(cfg.download[0].timeout_secs, 120);
         let tls = cfg.download[0].tls.as_ref().unwrap();
         assert_eq!(tls.ca.as_deref(), Some("root.pem"));
         assert_eq!(tls.client_cert.as_deref(), Some("client.pem"));
@@ -1224,6 +1255,23 @@ executable = "e"
         );
         assert_eq!(expand_vars("no vars", Path::new("C:/b")), "no vars");
         assert_eq!(expand_vars("50% done", Path::new("C:/b")), "50% done");
+    }
+
+    #[test]
+    fn url_password_redaction() {
+        assert_eq!(
+            redact_url_password("http://user:s3cret@proxy:8080"),
+            "http://user:********@proxy:8080"
+        );
+        assert_eq!(
+            redact_url_password("http://user@proxy:8080"),
+            "http://user@proxy:8080"
+        );
+        assert_eq!(
+            redact_url_password("http://proxy:8080"),
+            "http://proxy:8080"
+        );
+        assert_eq!(redact_url_password("not a url"), "not a url");
     }
 
     #[test]

@@ -11,6 +11,9 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (full)");
 #[cfg(not(feature = "download"))]
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (lite)");
 
+/// Hidden subcommand rsw spawns on itself to deliver a console ctrl event.
+pub const DELIVER_CTRL_COMMAND: &str = "__deliver-ctrl";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rsw",
@@ -73,11 +76,33 @@ pub enum Command {
         config: PathBuf,
     },
     /// Internal: one-shot ctrl-event delivery helper (spawned by rsw itself).
-    #[command(hide = true)]
+    /// The explicit name pins the contract with `process_win::send_ctrl_event`
+    /// (clap would otherwise derive `deliver-ctrl`).
+    #[command(name = DELIVER_CTRL_COMMAND, hide = true)]
     DeliverCtrl {
         /// Target process id.
         pid: u32,
         /// Event: "c" (ctrl-c) or "b" (ctrl-break).
         event: char,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `process_win::send_ctrl_event` spawns rsw with this exact subcommand
+    /// name; a mismatch silently disables graceful stops.
+    #[test]
+    fn deliver_ctrl_subcommand_name_matches_spawner() {
+        let cli = Cli::try_parse_from(["rsw", DELIVER_CTRL_COMMAND, "4242", "b"])
+            .expect("hidden helper subcommand must parse");
+        assert!(matches!(
+            cli.command,
+            Command::DeliverCtrl {
+                pid: 4242,
+                event: 'b'
+            }
+        ));
+    }
 }

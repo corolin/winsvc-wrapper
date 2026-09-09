@@ -152,40 +152,76 @@ pub fn send_ctrl_event(signal: StopSignal, child_pid: u32) -> std::io::Result<()
     use std::os::windows::process::CommandExt as _;
     let exe = env::current_exe().map_err(std::io::Error::other)?;
     let out = Command::new(exe)
-        .args(["__deliver-ctrl", &child_pid.to_string(), event_arg])
+        .args([
+            crate::cli::DELIVER_CTRL_COMMAND,
+            &child_pid.to_string(),
+            event_arg,
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map_err(std::io::Error::other)?;
-    if out.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other("ctrl delivery helper failed"))
+    match out.code() {
+        Some(DELIVER_OK) => Ok(()),
+        // The helper broadcast the event and was then torn down by that same
+        // event before its swallow handler ran (the default handler exits with
+        // STATUS_CONTROL_C_EXIT). Delivery happened; treat it as success.
+        Some(code) if code as u32 == STATUS_CONTROL_C_EXIT => Ok(()),
+        Some(DELIVER_NO_CONSOLE) => Err(std::io::Error::other(
+            "target process has no console to receive the event",
+        )),
+        Some(DELIVER_GENERATE_FAILED) => Err(std::io::Error::other(
+            "GenerateConsoleCtrlEvent failed in the delivery helper",
+        )),
+        Some(code) => Err(std::io::Error::other(format!(
+            "ctrl delivery helper exited with {code}"
+        ))),
+        None => Err(std::io::Error::other(
+            "ctrl delivery helper terminated without an exit code",
+        )),
     }
 }
 
-/// Helper entry for `__deliver-ctrl`: attaches to the target console (or uses
-/// the inherited one), broadcasts the event, swallowing it in this process.
+/// Exit codes of the `__deliver-ctrl` helper.
+pub const DELIVER_OK: i32 = 0;
+pub const DELIVER_NO_CONSOLE: i32 = 1;
+pub const DELIVER_GENERATE_FAILED: i32 = 2;
+pub const DELIVER_BAD_SIGNAL: i32 = 3;
+/// NTSTATUS a process exits with when the default ctrl handler terminates it.
+pub const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+/// Helper entry for `__deliver-ctrl`: attaches to the target console,
+/// broadcasts the event, swallowing it in this process.
+///
+/// Two details keep the helper alive through its own broadcast (measured:
+/// without them it dies with STATUS_CONTROL_C_EXIT most of the time):
+/// the swallow handler is installed *after* `AttachConsole`, and the helper
+/// lingers briefly before `FreeConsole` so the ctrl dispatch thread reaches
+/// our handler instead of the default terminator. `send_ctrl_event` still
+/// tolerates STATUS_CONTROL_C_EXIT as "delivered" for belt and braces.
 pub fn deliver_ctrl_event_direct(target_pid: u32, signal: StopSignal) -> i32 {
     use windows::Win32::System::Console::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent};
     let event = match signal {
         StopSignal::CtrlC => CTRL_C_EVENT,
         StopSignal::CtrlBreak => CTRL_BREAK_EVENT,
-        StopSignal::Kill => return 3,
+        StopSignal::Kill => return DELIVER_BAD_SIGNAL,
     };
     unsafe {
-        let _ = SetConsoleCtrlHandler(None, false);
-        let _ = SetConsoleCtrlHandler(Some(swallow_ctrl_handler), true);
         let _ = FreeConsole(); // detach from the inherited console, if any
         if AttachConsole(target_pid).is_err() {
-            return 1; // target has no console
+            return DELIVER_NO_CONSOLE; // target has no console
         }
+        let _ = SetConsoleCtrlHandler(None, false);
+        let _ = SetConsoleCtrlHandler(Some(swallow_ctrl_handler), true);
         let result = GenerateConsoleCtrlEvent(event, 0);
+        // Let the ctrl-handler thread reach our swallow handler before we
+        // detach; detaching mid-dispatch lets the default terminator win.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let _ = FreeConsole();
         match result {
-            Ok(()) => 0,
-            Err(_) => 2,
+            Ok(()) => DELIVER_OK,
+            Err(_) => DELIVER_GENERATE_FAILED,
         }
     }
 }

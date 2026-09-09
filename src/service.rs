@@ -141,11 +141,31 @@ fn run() -> (ServiceExitCode, Vec<String>) {
     ));
 
     let status_handle = HANDLE.get().unwrap();
+    // Each start phase bumps the checkpoint: the SCM tolerates any total start
+    // time as long as the checkpoint keeps increasing within the wait hint.
+    let start_checkpoint = std::sync::atomic::AtomicU32::new(1);
     let exit = supervisor::supervise(
         &resolved,
         &sink,
         &rx,
         &|update: StatusUpdate| match update {
+            StatusUpdate::StartPending {
+                phase,
+                wait_hint_ms,
+            } => {
+                let checkpoint =
+                    start_checkpoint.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                sink.info(&format!(
+                    "start phase: {phase} (checkpoint {checkpoint}, hint {}s)",
+                    wait_hint_ms / 1000
+                ));
+                set_status(
+                    ServiceState::StartPending,
+                    checkpoint,
+                    wait_hint_ms as u64 / 1000 + 1,
+                    ServiceExitCode::NO_ERROR,
+                )
+            }
             StatusUpdate::Running => {
                 set_status(ServiceState::Running, 0, 0, ServiceExitCode::NO_ERROR)
             }

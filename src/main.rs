@@ -120,9 +120,33 @@ fn cmd_validate(explicit: Option<&Path>) -> anyhow::Result<()> {
     }
     println!(
         "{}",
-        toml::to_string_pretty(&r.cfg).context("serializing the parsed config")?
+        toml::to_string_pretty(&redacted(&r.cfg)).context("serializing the parsed config")?
     );
     Ok(())
+}
+
+/// Copy of the config with every secret masked, for printing. Passwords may
+/// have been pulled from environment variables during expansion, so the
+/// printed value could otherwise leak more than the file itself contains.
+fn redacted(cfg: &config::Config) -> config::Config {
+    const MASK: &str = "********";
+    let mut cfg = cfg.clone();
+    if let Some(acct) = &mut cfg.service.account
+        && !acct.password.is_empty()
+    {
+        acct.password = MASK.into();
+    }
+    for d in &mut cfg.download {
+        if let Some(auth) = &mut d.auth
+            && !auth.password.is_empty()
+        {
+            auth.password = MASK.into();
+        }
+        if let Some(proxy) = &mut d.proxy {
+            *proxy = config::redact_url_password(proxy);
+        }
+    }
+    cfg
 }
 
 fn cmd_run(explicit: Option<&Path>) -> anyhow::Result<u32> {

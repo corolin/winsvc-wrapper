@@ -143,10 +143,11 @@ stop_signal = "kill"
 #     above-normal | high | realtime。
 priority = "normal"
 
-# EN: create the child without a console window (default true — service
-#     children should never pop up consoles; stop signals still reach it).
-# 中文：不给子进程分配可见控制台窗口（默认 true——服务子进程不应弹出
-#     控制台；停止信号仍可送达）。
+# EN: accepted for WinSW compatibility only — it has NO effect. rsw children
+#     always share the wrapper's hidden console (a separate hidden console
+#     would make stop signals undeliverable), so nothing ever pops up.
+# 中文：仅为兼容 WinSW 保留，**没有实际作用**。子进程始终共享 rsw 的隐藏
+#     控制台（单独的隐藏控制台会导致停止信号无法送达），不会弹出窗口。
 hide_window = true
 
 # EN: child exit codes that count as SUCCESS (mapped to service
@@ -253,10 +254,11 @@ dir = "%BASE%/logs"
 #     rsw 自身事件 → <base>.wrapper.log
 basename = "my-app"
 
-# EN: also echo child output to the console of the service (rarely useful
-#     for services; intended for `rsw run` debugging).
-# 中文：把子进程输出同时回显到服务控制台（服务场景很少用到，主要为
-#     `rsw run` 前台调试设计）。
+# EN: write rsw's own lifecycle events (start/stop/restart/signal/hook
+#     outcomes, timestamped) to <base>.wrapper.log. Set false to keep only
+#     the child's own logs.
+# 中文：把 rsw 自身的生命周期事件（启动/停止/重启/信号/钩子结果，带时间戳）
+#     写入 <base>.wrapper.log。设为 false 则只保留子进程自己的日志。
 wrapper_log = true
 
 # EN: rotation mode:
@@ -316,6 +318,12 @@ to = "%BASE%/downloads/agent.jar"
 # 中文：下载失败时是否让服务启动失败（默认：仅记录警告，继续用磁盘上的
 #     旧文件启动）。
 fail_on_error = false
+
+# EN: whole-request budget in seconds (connect + headers + body). A stalled
+#     server counts as a failed download instead of wedging the service start.
+# 中文：整个请求的时间预算（秒，含连接、响应头、正文）。服务器卡住时按
+#     下载失败处理，而不会拖死服务启动。
+timeout_secs = 120
 
 # EN: HTTP(S) proxy, optionally with credentials: http://user:pass@host:port
 # 中文：HTTP(S) 代理，可带凭据：http://user:pass@host:port

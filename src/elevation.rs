@@ -30,7 +30,16 @@ pub fn is_current_process_elevated() -> bool {
 /// elevation markers, waits for it, echoes its output, and returns its exit
 /// code. The child inherits `cwd` so sidecar and relative config paths work.
 pub fn relaunch_elevated(exe: &Path, args: &[String], cwd: &Path) -> anyhow::Result<i32> {
-    let redirect = env::temp_dir().join(format!("rsw-elevated-{}.log", std::process::id()));
+    let redirect = temp_redirect_path();
+    // Create the file NOW, exclusively, as the unelevated user: the elevated
+    // child then only ever writes into a file we own, and a pre-planted file
+    // or junction at a guessable name makes the run fail instead of being
+    // followed with admin rights.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&redirect)
+        .with_context(|| format!("creating redirect file {}", redirect.display()))?;
     let mut params = args.to_vec();
     params.push("--elevated".into());
     params.push("--redirect".into());
@@ -102,8 +111,12 @@ pub fn redirect_output_to(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Used by tests/CLI plumbing; not part of the steady-state flow.
-#[allow(dead_code)]
-pub fn temp_redirect_path() -> PathBuf {
-    env::temp_dir().join(format!("rsw-elevated-{}.log", std::process::id()))
+/// Per-run redirect file name: pid plus a nanosecond stamp, so the name is
+/// not guessable ahead of time.
+fn temp_redirect_path() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    env::temp_dir().join(format!("rsw-elevated-{}-{nanos:x}.log", std::process::id()))
 }

@@ -8,6 +8,9 @@
 //!   test-child crash <code> [after-ms] exit with the given code
 //!   test-child graceful [cleanup-ms]   install a ctrl handler; on ctrl event,
 //!                                      wait cleanup-ms, print GRACEFUL-DONE, exit 0
+//!   test-child graceful-break [cleanup-ms]
+//!                                      like graceful, but reacts to ctrl-break
+//!                                      only and swallows ctrl-c
 //!   test-child sleep <ms>              sleep then exit 0
 //!   test-child hang                    print STARTED then sleep forever
 //!   test-child spawn-grandchild        spawn `test-child hang`, print its pid, then hang
@@ -44,6 +47,17 @@ unsafe extern "system" fn on_ctrl(ctrl_type: u32) -> BOOL {
             STOP.store(true, Ordering::SeqCst);
             BOOL(1)
         }
+        _ => BOOL(0),
+    }
+}
+
+unsafe extern "system" fn on_ctrl_break_only(ctrl_type: u32) -> BOOL {
+    match ctrl_type {
+        CTRL_BREAK_EVENT => {
+            STOP.store(true, Ordering::SeqCst);
+            BOOL(1)
+        }
+        CTRL_C_EVENT => BOOL(1), // swallow: stay alive
         _ => BOOL(0),
     }
 }
@@ -92,6 +106,25 @@ fn main() {
                 // CREATE_NEW_PROCESS_GROUP parent, then install our handler.
                 let _ = SetConsoleCtrlHandler(None, false);
                 let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
+            }
+            println!("GRACEFUL-READY");
+            let _ = std::io::stdout().flush();
+            while !STOP.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(cleanup_ms));
+            println!("GRACEFUL-DONE");
+            let _ = std::io::stdout().flush();
+        }
+        "graceful-break" => {
+            // Like graceful, but ONLY ctrl-break counts; ctrl-c is swallowed.
+            // Lets a test raise ctrl-c on the shared console to ask rsw to
+            // stop without that same event reaching this child — so the only
+            // way this child exits gracefully is rsw's own ctrl-break delivery.
+            let cleanup_ms: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
+            unsafe {
+                let _ = SetConsoleCtrlHandler(None, false);
+                let _ = SetConsoleCtrlHandler(Some(on_ctrl_break_only), true);
             }
             println!("GRACEFUL-READY");
             let _ = std::io::stdout().flush();

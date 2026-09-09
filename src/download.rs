@@ -4,14 +4,14 @@
 //! Mirrors WinSW's caching behavior: an `If-Modified-Since` header derived
 //! from the destination's mtime, HTTP 304 treated as success, and the file's
 //! mtime restored from the server's `Last-Modified` header so later starts
-//! skip unchanged files. Bodies go to a `.tmp` sibling and are renamed into
-//! place, so an interrupted download never truncates the destination.
+//! skip unchanged files. Bodies stream to a `<name>.tmp.rsw` sibling and are
+//! renamed into place, so an interrupted download never truncates the
+//! destination. Every request runs under the entry's `timeout_secs`.
 
 use std::fs;
-use std::io::Read as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, bail};
 use chrono::{DateTime, Utc};
@@ -50,7 +50,11 @@ fn download_one(d: &DownloadConfig, working_dir: &Path, sink: &LogSink) -> anyho
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    let agent = build_agent(d.proxy.as_deref(), d.tls.as_ref())?;
+    let agent = build_agent(
+        d.proxy.as_deref(),
+        d.tls.as_ref(),
+        Duration::from_secs(d.timeout_secs.max(1)),
+    )?;
     let mut request = agent.get(&d.from);
     if let Some(auth) = &d.auth {
         request = request.header("Authorization", &basic_auth_header(auth));
@@ -90,15 +94,23 @@ fn download_one(d: &DownloadConfig, working_dir: &Path, sink: &LogSink) -> anyho
         bail!("HTTP {}", response.status());
     }
 
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut body)
-        .context("reading response body")?;
-
-    let tmp: PathBuf = dest.with_extension("tmp.rsw");
-    fs::write(&tmp, &body).with_context(|| format!("writing {}", tmp.display()))?;
+    // Stream straight to the staging file: artifacts can be hundreds of MB
+    // and a service wrapper should not buffer them in memory.
+    let tmp = temp_sibling(&dest);
+    let written = {
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        let copied = std::io::copy(&mut response.body_mut().as_reader(), &mut file)
+            .with_context(|| format!("writing {}", tmp.display()));
+        match copied {
+            Ok(n) => n,
+            Err(e) => {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    };
     fs::rename(&tmp, &dest).with_context(|| format!("renaming into {}", dest.display()))?;
 
     if let Some(t) = response
@@ -109,16 +121,25 @@ fn download_one(d: &DownloadConfig, working_dir: &Path, sink: &LogSink) -> anyho
     {
         let _ = set_file_mtime(&dest, t);
     }
-    sink.info(&format!(
-        "downloaded {} bytes to {}",
-        body.len(),
-        dest.display()
-    ));
+    sink.info(&format!("downloaded {written} bytes to {}", dest.display()));
     Ok(())
 }
 
-fn build_agent(proxy: Option<&str>, tls: Option<&DownloadTlsConfig>) -> anyhow::Result<Agent> {
-    let mut builder = ureq::config::Config::builder();
+/// `<dest>.tmp.rsw` next to the destination — appended to the full file name
+/// (not swapped for the extension) so `a.jar` and `a.zip` in one directory
+/// never share a staging file.
+fn temp_sibling(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp.rsw");
+    dest.with_file_name(name)
+}
+
+fn build_agent(
+    proxy: Option<&str>,
+    tls: Option<&DownloadTlsConfig>,
+    timeout: Duration,
+) -> anyhow::Result<Agent> {
+    let mut builder = ureq::config::Config::builder().timeout_global(Some(timeout));
     if let Some(proxy_url) = proxy {
         let proxy = ureq::Proxy::new(proxy_url).context("invalid proxy URL")?;
         builder = builder.proxy(Some(proxy));
@@ -316,6 +337,22 @@ mod tests {
                 "error must name the offending field ({needle}): {err}"
             );
         }
+    }
+
+    #[test]
+    fn temp_sibling_keeps_full_name() {
+        assert_eq!(
+            temp_sibling(Path::new(r"C:\x\a.jar")),
+            PathBuf::from(r"C:\x\a.jar.tmp.rsw")
+        );
+        assert_ne!(
+            temp_sibling(Path::new(r"C:\x\a.jar")),
+            temp_sibling(Path::new(r"C:\x\a.zip"))
+        );
+        assert_eq!(
+            temp_sibling(Path::new(r"C:\x\noext")),
+            PathBuf::from(r"C:\x\noext.tmp.rsw")
+        );
     }
 
     #[test]

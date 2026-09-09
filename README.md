@@ -72,7 +72,8 @@ without failing.
 | `rsw status [config]` | Print state; exit 0 running/stopped, 1 transitional, 1060 not installed |
 | `rsw refresh [config]` | Re-read config and update service properties in place |
 | `rsw run [config]` | Run in the foreground for debugging (no SCM, no admin, Ctrl+C stops) |
-| `rsw validate [config]` | Parse + validate and print the resolved config |
+| `rsw validate [config]` | Parse + validate and print the resolved config (secrets masked) |
+| `rsw convert winsw.xml` | Convert a WinSW XML service definition into an rsw TOML file |
 
 `[config]` is optional when using the sidecar rename convention.
 
@@ -113,7 +114,7 @@ stop_arguments = []
 stop_signal = "kill"              # kill (immediate tree kill) | ctrl-c | ctrl-break
 stop_timeout_secs = 15
 priority = "normal"               # idle|below_normal|normal|above_normal|high|realtime
-hide_window = true
+hide_window = true                # accepted for WinSW parity; children always share rsw's hidden console
 success_exit_codes = [0]          # mapped to service NO_ERROR
 
 [process.restart]                 # in-wrapper supervision (milliseconds-fast)
@@ -146,6 +147,7 @@ merge_stderr = false
 from = "https://example.com/agent.jar"
 to = "agent.jar"
 fail_on_error = false
+timeout_secs = 120                # whole-request budget; a stalled server cannot wedge the start
 # proxy = "http://user:pass@host:port"
 # auth = { kind = "basic", user = "u", password = "p" }
 
@@ -241,10 +243,15 @@ MIT — see [LICENSE](LICENSE).
 ## Design notes
 
 - **Signals in session 0**: services have no console, so rsw allocates a hidden
-  one. When a child lives in a different console (`hide_window`), rsw attaches
-  to the child's console to deliver the Ctrl event, then re-attaches its own.
-  Processes created via `CREATE_NEW_PROCESS_GROUP` start with ctrl-c disabled;
-  rsw re-enables it explicitly, both for itself and via `ctrl_break` targeting.
+  one that the child shares. Ctrl events are broadcast by a short-lived helper
+  process (`rsw` relaunching itself) that attaches to the child's console and
+  swallows the event on its own side, so rsw never risks being terminated by
+  the signal it sends. Processes created via `CREATE_NEW_PROCESS_GROUP` start
+  with ctrl-c disabled; rsw re-enables it explicitly, both for itself and via
+  `ctrl_break` targeting.
+- **Start progress**: each start phase (pre-start hook, downloads, drive
+  mapping, spawn) bumps the SCM checkpoint with a wait hint sized to that
+  phase's timeout, so a slow hook or download never trips error 1053.
 - **Orphan protection**: every child joins a kill-on-close job object, so if
   rsw dies for any reason the kernel terminates the whole tree.
 - **All-synchronous threading**: no async runtime; reader threads pump child

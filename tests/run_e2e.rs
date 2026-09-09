@@ -233,6 +233,70 @@ fn graceful_stop_via_ctrl_c() {
         wrapper.contains("child exited after signal") || wrapper.contains("already exited"),
         "unexpected stop path: {wrapper}"
     );
+    // The child here also hears the test's own ctrl-c broadcast, so the ladder
+    // may find it already gone; but whenever the ladder DID signal, rsw's
+    // delivery helper must have worked.
+    assert!(
+        !wrapper.contains("could not deliver ctrl event"),
+        "rsw's ctrl delivery helper failed: {wrapper}"
+    );
+}
+
+/// Regression: the ctrl delivery helper was spawned under a subcommand name
+/// clap never generated, so rsw could never signal a child on its own — the
+/// e2e tests passed only because their ctrl-c broadcast hit the child directly.
+/// This child swallows ctrl-c and reacts to ctrl-break only: the test's ctrl-c
+/// asks rsw to stop, and the ONLY way the child exits gracefully is rsw's own
+/// ctrl-break delivery through the helper.
+#[test]
+fn graceful_stop_signal_is_delivered_by_rsw_itself() {
+    let setup = setup(concat!(
+        "arguments = [\"graceful-break\", \"200\"]\n",
+        "stop_signal = \"ctrl-break\"\n",
+        "stop_timeout_secs = 8\n"
+    ));
+    let mut rsw = spawn_rsw(&setup, CREATE_NEW_CONSOLE);
+    assert!(
+        wait_for_log(
+            &setup,
+            "app.out.log",
+            "GRACEFUL-READY",
+            Duration::from_secs(15)
+        ),
+        "child did not start"
+    );
+
+    let _ = Command::new(TEST_CHILD)
+        .args(["ctrl-c", &rsw.id().to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .expect("run signaler");
+
+    let started = Instant::now();
+    let code = wait_exit(&mut rsw, Duration::from_secs(30));
+    if code.is_none() {
+        dump_logs(&setup);
+        panic!("rsw did not exit");
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(code.unwrap(), 0);
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "stop should be graceful, not a timeout kill; took {elapsed:?}"
+    );
+    let wrapper = read_log(&setup, "app.wrapper.log");
+    assert!(
+        wrapper.contains("sent CtrlBreak to child"),
+        "rsw must deliver the signal itself: {wrapper}"
+    );
+    assert!(
+        wrapper.contains("child exited after signal"),
+        "child must exit because of rsw's signal: {wrapper}"
+    );
+    assert!(
+        read_log(&setup, "app.out.log").contains("GRACEFUL-DONE"),
+        "child skipped graceful cleanup"
+    );
 }
 
 #[test]
@@ -349,6 +413,36 @@ fn validate_prints_resolved_config() {
     assert!(
         stdout.contains("e2e-test"),
         "validate output missing service id: {stdout}"
+    );
+}
+
+#[test]
+fn validate_redacts_secrets() {
+    let setup = setup(concat!(
+        "arguments = [\"echo\", \"x\"]\n\n",
+        "[service.account]\nusername = '.\\svc'\npassword = \"Hunter2-Secret\"\n\n",
+        "[[download]]\nfrom = \"https://example.com/a.jar\"\nto = \"a.jar\"\n",
+        "proxy = \"http://pu:ProxyPass@proxy:8080\"\n",
+        "auth = { kind = \"basic\", user = \"u\", password = \"BasicPass\" }\n"
+    ));
+    let output = Command::new(RSW)
+        .arg("validate")
+        .arg("app.toml")
+        .current_dir(&setup.dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "validate failed: {stdout}");
+    for secret in ["Hunter2-Secret", "ProxyPass", "BasicPass"] {
+        assert!(
+            !stdout.contains(secret),
+            "validate must not print `{secret}`: {stdout}"
+        );
+    }
+    assert!(stdout.contains("********"), "mask missing: {stdout}");
+    assert!(
+        stdout.contains("pu:********@proxy"),
+        "proxy user kept: {stdout}"
     );
 }
 

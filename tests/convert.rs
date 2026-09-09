@@ -73,6 +73,14 @@ fn converts_real_dsh_service_xml() {
 
     let env = table["env"].as_table().unwrap();
     assert_eq!(env["NODE_ENV"].as_str(), Some("production"));
+
+    // Regression: the WinSW v2 <serviceaccount> shape (<domain> + <user> +
+    // <password> + <allowservicelogon>) used to be dropped silently, so the
+    // migrated service would have run as LocalSystem.
+    let account = service["account"].as_table().unwrap();
+    assert_eq!(account["username"].as_str(), Some(".\\YourUsername"));
+    assert_eq!(account["password"].as_str(), Some("YourPassword"));
+    assert_eq!(account["allow_logon_as_service"].as_bool(), Some(true));
 }
 
 /// A hand-written edge-case XML: env/depend/onfailure/download/account/
@@ -100,10 +108,13 @@ fn converts_edge_case_xml() {
   <serviceaccount>
     <username>.\svc_edge</username>
     <password>secret</password>
+    <allowservicelogon>false</allowservicelogon>
   </serviceaccount>
   <download from="https://example.com/a.jar" to="a.jar" failOnError="true"/>
   <HideWindow>true</HideWindow>
   <Priority>AboveNormal</Priority>
+  <preshutdown>true</preshutdown>
+  <preshutdownTimeout>00:03:00</preshutdownTimeout>
 </SERVICE>
 "#,
     )
@@ -135,6 +146,13 @@ fn converts_edge_case_xml() {
     );
     let account = table["service"]["account"].as_table().unwrap();
     assert_eq!(account["username"].as_str(), Some(".\\svc_edge"));
+    assert_eq!(account["allow_logon_as_service"].as_bool(), Some(false));
+    assert_eq!(table["service"]["preshutdown"].as_bool(), Some(true));
+    assert_eq!(
+        table["service"]["preshutdown_timeout_secs"].as_integer(),
+        Some(180),
+        "camelCase <preshutdownTimeout> must be matched case-insensitively"
+    );
 
     let process = table["process"].as_table().unwrap();
     assert_eq!(
@@ -152,7 +170,9 @@ fn converts_edge_case_xml() {
         Some("shutdown-now")
     );
     assert_eq!(process["priority"].as_str(), Some("above-normal"));
-    assert_eq!(process["hide_window"].as_bool(), Some(true));
+    // <hidewindow> has no rsw counterpart (children never get a visible
+    // console), so the converter must not emit the compatibility field.
+    assert!(process.get("hide_window").is_none());
 
     let logging = table["logging"].as_table().unwrap();
     assert_eq!(logging["mode"].as_str(), Some("roll-by-size")); // legacy "rotate"

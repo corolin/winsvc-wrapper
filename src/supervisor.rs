@@ -37,8 +37,28 @@ pub enum ControlEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusUpdate {
+    /// A start phase (pre-start hook, downloads, ...) is about to run and may
+    /// take up to `wait_hint_ms`. The SCM layer bumps its checkpoint on every
+    /// one of these so long phases do not trip the start timeout (1053).
+    StartPending {
+        phase: &'static str,
+        wait_hint_ms: u32,
+    },
     Running,
-    StopPending { elapsed_ms: u32, wait_hint_ms: u32 },
+    StopPending {
+        elapsed_ms: u32,
+        wait_hint_ms: u32,
+    },
+}
+
+/// Slack added to every start-phase wait hint, in seconds.
+const START_HINT_MARGIN_SECS: u64 = 10;
+
+fn start_hint_ms(budget_secs: u64) -> u32 {
+    budget_secs
+        .saturating_add(START_HINT_MARGIN_SECS)
+        .saturating_mul(1000)
+        .min(u32::MAX as u64) as u32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +83,12 @@ pub fn supervise(
     let proc = &r.cfg.process;
     let working_dir = r.working_dir().to_path_buf();
 
+    if let Some(hook) = r.cfg.hooks.pre_start.as_ref() {
+        status(StatusUpdate::StartPending {
+            phase: "pre-start hook",
+            wait_hint_ms: start_hint_ms(hook.timeout_secs.max(1)),
+        });
+    }
     if let Some(code) = run_hook(
         r.cfg.hooks.pre_start.as_ref(),
         "pre-start",
@@ -75,6 +101,18 @@ pub fn supervise(
         return ServiceExit::StartFailed(None);
     }
 
+    if !r.cfg.download.is_empty() {
+        let budget: u64 = r
+            .cfg
+            .download
+            .iter()
+            .map(|d| d.timeout_secs.max(1))
+            .fold(0u64, u64::saturating_add);
+        status(StatusUpdate::StartPending {
+            phase: "downloads",
+            wait_hint_ms: start_hint_ms(budget),
+        });
+    }
     #[cfg(feature = "download")]
     if let Err(e) = run_downloads(&r.cfg.download, &working_dir, sink) {
         sink.error(&format!("{e:#}"));
@@ -97,7 +135,18 @@ pub fn supervise(
             d.from, d.to
         ));
     }
+    if !r.cfg.map_drive.is_empty() {
+        // WNetAddConnection2 can block on an unreachable server for a while.
+        status(StatusUpdate::StartPending {
+            phase: "drive mapping",
+            wait_hint_ms: start_hint_ms(30 * r.cfg.map_drive.len() as u64),
+        });
+    }
     map_drives(&r.cfg.map_drive, sink);
+    status(StatusUpdate::StartPending {
+        phase: "spawn",
+        wait_hint_ms: start_hint_ms(0),
+    });
 
     let job = match ProcessJob::create_kill_on_close() {
         Ok(job) => job,
@@ -361,42 +410,62 @@ fn sleep_cancellable(secs: u64, control_rx: &Receiver<ControlEvent>, interactive
     false
 }
 
-/// Wires the child's stdout/stderr pipes into the log sink; returns the pump
-/// thread handles so the caller can drain them once the child is gone.
-fn pump_output(child: &mut Child, sink: Arc<LogSink>) -> Vec<std::thread::JoinHandle<()>> {
-    let mut pumps = Vec::new();
+/// The reader threads pumping one child's stdout/stderr, plus a channel each
+/// pump signals on when its stream hits EOF.
+struct Pumps {
+    handles: Vec<std::thread::JoinHandle<()>>,
+    done_rx: Receiver<()>,
+}
+
+/// Wires the child's stdout/stderr pipes into the log sink; returns the pumps
+/// so the caller can drain them once the child is gone.
+fn pump_output(child: &mut Child, sink: Arc<LogSink>) -> Pumps {
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let mut handles = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         let sink_out = Arc::clone(&sink);
-        pumps.push(std::thread::spawn(move || {
-            pump_stream(stdout, sink_out, Channel::Out)
+        let done = done_tx.clone();
+        handles.push(std::thread::spawn(move || {
+            pump_stream(stdout, sink_out, Channel::Out);
+            let _ = done.send(());
         }));
     }
     if let Some(stderr) = child.stderr.take() {
-        pumps.push(std::thread::spawn(move || {
-            pump_stream(stderr, sink, Channel::Err)
+        let done = done_tx.clone();
+        handles.push(std::thread::spawn(move || {
+            pump_stream(stderr, sink, Channel::Err);
+            let _ = done.send(());
         }));
     }
-    pumps
+    Pumps { handles, done_rx }
 }
 
 /// Waits for the log pumps to finish after the child is gone. Detached pumps
 /// can still be mid-write when the process exits, silently dropping the final
 /// output — an unterminated last line especially, which `read_until` only
 /// delivers at EOF (i.e. after the child exits, racing our own exit path).
-fn drain_pumps(pumps: Vec<std::thread::JoinHandle<()>>, sink: &LogSink) {
-    for handle in pumps {
-        let (done, rx) = mpsc::channel::<()>();
-        let waiter = std::thread::spawn(move || {
-            let _ = handle.join();
-            let _ = done.send(());
-        });
-        if rx.recv_timeout(PUMP_DRAIN_TIMEOUT).is_err() {
-            sink.warn(
-                "log streams did not drain in time (a grandchild may hold the pipe open); continuing",
-            );
-            break; // remaining handles drop = detached, pre-fix behavior
+///
+/// Waits on the pumps' completion channel instead of joining, so a pump that
+/// never reaches EOF (a grandchild inherited the pipe) is simply left detached
+/// — no helper thread is spawned or leaked per drain.
+fn drain_pumps(pumps: Pumps, sink: &LogSink) {
+    let deadline = Instant::now() + PUMP_DRAIN_TIMEOUT;
+    let mut finished = 0usize;
+    while finished < pumps.handles.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match pumps.done_rx.recv_timeout(remaining) {
+            Ok(()) => finished += 1,
+            Err(_) => break, // timeout, or every sender is gone
         }
-        let _ = waiter.join();
+    }
+    if finished < pumps.handles.len() {
+        sink.warn(
+            "log streams did not drain in time (a grandchild may hold the pipe open); continuing",
+        );
+        return; // unfinished handles drop = detached
+    }
+    for handle in pumps.handles {
+        let _ = handle.join(); // all signalled done: joins return immediately
     }
 }
 

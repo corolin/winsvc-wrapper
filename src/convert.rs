@@ -326,7 +326,7 @@ fn generate(w: &WinswConfig, source: &Path) -> String {
     {
         e.line("preshutdown = true");
     }
-    if let Some(t) = w.text("preshutdownTimeout") {
+    if let Some(t) = w.text("preshutdowntimeout") {
         e.line(&format!(
             "preshutdown_timeout_secs = {}",
             parse_duration_secs(t)
@@ -339,16 +339,39 @@ fn generate(w: &WinswConfig, source: &Path) -> String {
     }
 
     // --- [service.account] -------------------------------------------------
-    let sa_user = w.log_attrs.get("sa_username").cloned();
+    // WinSW v3: <username>DOMAIN\user</username>; v2: <domain> + <user>.
+    let sa = |key: &str| {
+        w.log_attrs
+            .get(&format!("sa_{key}"))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    };
+    let sa_user = match (sa("username"), sa("user")) {
+        (Some(username), _) => Some(username.to_string()),
+        (None, Some(user)) if user.contains(['\\', '@']) => Some(user.to_string()),
+        (None, Some(user)) => {
+            let domain = sa("domain").unwrap_or(".");
+            Some(format!("{domain}\\{user}"))
+        }
+        (None, None) => None,
+    };
     if let Some(user) = sa_user {
         e.line("");
         e.line("[service.account]");
         e.line(&format!("username = {}", toml_string(&user)));
-        if let Some(pw) = w.log_attrs.get("sa_password").filter(|p| !p.is_empty()) {
+        if let Some(pw) = sa("password") {
             e.warn("serviceaccount password was copied verbatim into the TOML — consider setting the account in services.msc instead (passwords in files are plaintext).");
             e.line(&format!("password = {}", toml_string(pw)));
         }
-        e.line("allow_logon_as_service = true");
+        let allow = sa("allowservicelogon")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        e.line(&format!("allow_logon_as_service = {allow}"));
+        if sa("prompt").is_some() {
+            e.warn("serviceaccount <prompt> (interactive credential prompt) is not supported by rsw; the password must be provided in the config or set in services.msc.");
+        }
+    } else if w.log_attrs.keys().any(|k| k.starts_with("sa_")) {
+        e.warn("<serviceaccount> is present but names no account (<username> or <domain>+<user>); the service will run as LocalSystem.");
     }
 
     // --- [process] ---------------------------------------------------------
@@ -403,11 +426,8 @@ fn generate(w: &WinswConfig, source: &Path) -> String {
             e.line(&format!("priority = \"{mapped}\""));
         }
     }
-    if let Some(v) = w.text_lower("hidewindow")
-        && v == "true"
-    {
-        e.line("hide_window = true");
-    }
+    // <hidewindow> needs no counterpart: rsw children never get a visible
+    // console (they share rsw's hidden one), see [process] hide_window docs.
 
     // --- [env] -------------------------------------------------------------
     let envs: Vec<&BTreeMap<String, String>> = w

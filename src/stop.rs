@@ -215,7 +215,9 @@ fn wait_for_exit(
     let mut last_tick = Instant::now();
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            return Some(status.code().unwrap_or(0) as u32);
+            // Code-less termination maps to ERROR_PROCESS_ABORTED like the
+            // supervisor's run loop — never to "success".
+            return Some(status.code().unwrap_or(1067) as u32);
         }
         if Instant::now() >= deadline {
             return None;
