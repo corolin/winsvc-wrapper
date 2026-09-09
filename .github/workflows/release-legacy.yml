@@ -47,6 +47,11 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          # Legacy builds are perpetual pre-releases: they are cut from a
+          # pinned nightly and target a platform outside the main line's
+          # test matrix. Also keeps them out of GitHub's "Latest" resolution.
+          prerelease: true
+          make_latest: false
           files: |
             rsw-*-win7-windows-msvc-full.zip
             rsw-*-win7-windows-msvc-lite.zip
