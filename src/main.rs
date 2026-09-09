@@ -128,6 +128,9 @@ fn cmd_validate(explicit: Option<&Path>) -> anyhow::Result<()> {
 /// Copy of the config with every secret masked, for printing. Passwords may
 /// have been pulled from environment variables during expansion, so the
 /// printed value could otherwise leak more than the file itself contains.
+/// `[env]` values are printed verbatim BY DESIGN: they configure the child
+/// and masking them would make the dump useless for debugging. Configs that
+/// keep real secrets in [env] should not be dumped into shared logs.
 fn redacted(cfg: &config::Config) -> config::Config {
     const MASK: &str = "********";
     let mut cfg = cfg.clone();

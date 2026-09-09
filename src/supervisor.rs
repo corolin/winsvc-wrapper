@@ -54,11 +54,17 @@ pub enum StatusUpdate {
 /// Slack added to every start-phase wait hint, in seconds.
 const START_HINT_MARGIN_SECS: u64 = 10;
 
+/// Wait hints travel as u32 milliseconds into the SCM (the windows-service
+/// crate panics past u32::MAX), and no SCM consumer makes sense of more than
+/// a day anyway — clamp every hint here instead of letting the conversion
+/// wrap or panic on absurd config values (a `timeout_secs` typo).
+const MAX_HINT_MS: u64 = 24 * 60 * 60 * 1000;
+
 fn start_hint_ms(budget_secs: u64) -> u32 {
     budget_secs
         .saturating_add(START_HINT_MARGIN_SECS)
         .saturating_mul(1000)
-        .min(u32::MAX as u64) as u32
+        .min(MAX_HINT_MS) as u32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,8 +327,8 @@ pub fn supervise(
             &job,
             |elapsed, total| {
                 status(StatusUpdate::StopPending {
-                    elapsed_ms: elapsed.as_millis() as u32,
-                    wait_hint_ms: total.as_millis() as u32,
+                    elapsed_ms: elapsed.as_millis().min(MAX_HINT_MS as u128) as u32,
+                    wait_hint_ms: total.as_millis().min(MAX_HINT_MS as u128) as u32,
                 });
             },
         );
@@ -455,7 +461,13 @@ fn drain_pumps(pumps: Pumps, sink: &LogSink) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match pumps.done_rx.recv_timeout(remaining) {
             Ok(()) => finished += 1,
-            Err(_) => break, // timeout, or every sender is gone
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            // Every sender dropped without signalling: a pump died (panicked)
+            // instead of stalling — do not blame a grandchild for it.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                sink.warn("a log pump ended without reaching EOF; its tail may be lost");
+                return; // unfinished handles drop = detached
+            }
         }
     }
     if finished < pumps.handles.len() {
@@ -498,5 +510,20 @@ fn pump_stream<R: Read>(reader: R, sink: Arc<LogSink>, channel: Channel) {
         }
         let line = String::from_utf8_lossy(&buf);
         sink.child_line(channel, &line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_hints_stay_within_scm_bounds() {
+        assert_eq!(start_hint_ms(0), 10_000);
+        assert_eq!(start_hint_ms(60), 70_000);
+        // A typo like timeout_secs = 5_000_000 (~58 days) must clamp here,
+        // not survive as u32::MAX ms and panic the wait-hint conversion
+        // inside windows-service (Too long wait_hint).
+        assert_eq!(start_hint_ms(u64::MAX), MAX_HINT_MS as u32);
     }
 }

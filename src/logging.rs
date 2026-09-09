@@ -306,7 +306,9 @@ impl RotatingFile {
             return;
         };
         let prefix = format!("{}.", self.stem);
-        // Period names sort chronologically for the supported tokens.
+        // Period names sort chronologically for year-leading patterns
+        // (the recommended yyyyMM... forms); a positional pattern such as
+        // dd-MM-yyyy sorts lexically, not by time.
         let mut by_period: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
         for entry in entries.flatten() {
             let Ok(name) = entry.file_name().into_string() else {

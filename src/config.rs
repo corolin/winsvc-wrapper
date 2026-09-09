@@ -604,8 +604,8 @@ impl Config {
         {
             errors.push(format!("[logging] auto_roll_at `{at}` must be HH:MM:SS"));
         }
-        if log.keep_files < -1 {
-            errors.push("[logging] keep_files must be >= -1 (-1 keeps everything)".into());
+        if log.keep_files < -1 || log.keep_files == 0 {
+            errors.push("[logging] keep_files must be >= 1, or -1 to keep everything".into());
         }
         for (k, v) in &self.env {
             if k.is_empty() || k.contains('=') || k.contains('\0') {
@@ -982,7 +982,9 @@ pub fn redact_url_password(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
-    let Some((userinfo, host)) = rest.split_once('@') else {
+    // rsplit: an unescaped '@' in the password would otherwise split early
+    // and leak the password's tail into the "host" part.
+    let Some((userinfo, host)) = rest.rsplit_once('@') else {
         return url.to_string();
     };
     match userinfo.split_once(':') {
@@ -1261,6 +1263,11 @@ executable = "e"
     fn url_password_redaction() {
         assert_eq!(
             redact_url_password("http://user:s3cret@proxy:8080"),
+            "http://user:********@proxy:8080"
+        );
+        // an unescaped '@' inside the password must not leak its tail
+        assert_eq!(
+            redact_url_password("http://user:p@ss@proxy:8080"),
             "http://user:********@proxy:8080"
         );
         assert_eq!(

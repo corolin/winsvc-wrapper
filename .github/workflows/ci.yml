@@ -17,6 +17,16 @@ env:
   RUST_TEST_THREADS: "4"
 
 jobs:
+  msrv:
+    # Cargo.toml declares rust-version; without a pinned build it silently
+    # rots as dependencies raise their own requirements.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+      - run: cargo check --no-default-features --all-targets
   ci:
     runs-on: windows-latest
     steps:

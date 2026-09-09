@@ -29,6 +29,16 @@ pub fn is_current_process_elevated() -> bool {
 /// Relaunches the current executable with `runas`, appending the internal
 /// elevation markers, waits for it, echoes its output, and returns its exit
 /// code. The child inherits `cwd` so sidecar and relative config paths work.
+/// Removes the redirect file when the elevation attempt ends, whichever
+/// way it ends (UAC cancelled, no process handle, success) — a cancelled
+/// prompt must not leave droppings in %TEMP%.
+struct RemoveOnDrop(PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub fn relaunch_elevated(exe: &Path, args: &[String], cwd: &Path) -> anyhow::Result<i32> {
     let redirect = temp_redirect_path();
     // Create the file NOW, exclusively, as the unelevated user: the elevated
@@ -40,6 +50,7 @@ pub fn relaunch_elevated(exe: &Path, args: &[String], cwd: &Path) -> anyhow::Res
         .create_new(true)
         .open(&redirect)
         .with_context(|| format!("creating redirect file {}", redirect.display()))?;
+    let _redirect_cleanup = RemoveOnDrop(redirect.clone());
     let mut params = args.to_vec();
     params.push("--elevated".into());
     params.push("--redirect".into());
@@ -83,7 +94,6 @@ pub fn relaunch_elevated(exe: &Path, args: &[String], cwd: &Path) -> anyhow::Res
         if let Ok(text) = std::fs::read_to_string(&redirect) {
             eprint!("{text}")
         }
-        let _ = std::fs::remove_file(&redirect);
         Ok(code as i32)
     }
 }
