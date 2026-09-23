@@ -1,0 +1,284 @@
+# ============================================================================
+# rsw configuration reference — every field (English)
+#
+# The common/classic starter template is rsw.example.toml.
+#
+# Place next to rsw.exe (optionally renamed) or pass explicitly:
+#   rsw install rsw.example-full-en.toml
+#
+# %BASE% expands to the directory containing THIS file, in every string
+# field below; %ANY_VAR% expands from the process environment. Relative
+# paths resolve against the config directory.
+# ============================================================================
+
+[service]
+# Unique Windows service id (REQUIRED). Used by the SCM, must not
+# contain '/' or '\'.
+id = "my-app"
+
+# Display name shown in services.msc. Defaults to the id.
+name = "My Application"
+
+# Longer description shown in the service properties dialog.
+description = "Example service wrapped by rsw"
+
+# How the service starts at boot:
+#     "auto"     start at boot
+#     "delayed"  start at boot, after other auto services (recommended for apps)
+#     "manual"   started on demand (sc start / rsw start)
+#     "disabled" cannot be started
+#     "boot"/"system" driver-only start types
+start_type = "auto"
+
+# Service ids that must start before this one.
+dependencies = ["Tcpip"]
+
+# How long without failures before the SCM failure counter resets.
+#     Suffixes: ms/sec/min/hr/day; a bare number means milliseconds.
+failure_reset_after = "1 day"
+
+# Accept Windows preshutdown notifications (the service gets extra time
+# to stop cleanly before the system goes down).
+preshutdown = false
+
+# Max seconds granted during preshutdown (when preshutdown = true).
+preshutdown_timeout_secs = 180
+
+# SDDL security descriptor restricting who can control the service.
+# security_descriptor = "D:P(A;;GA;;;BA)(A;;GR;;;AU)"
+
+# Accounts that may start/stop THIS service without elevation (no UAC).
+# rsw generates the service DACL granting them SERVICE_START/SERVICE_STOP;
+# admins and SYSTEM keep full control. Mutually exclusive with
+# security_descriptor above.
+# allow_start_stop = ["BUILTIN\\Users", "DOMAIN\\ops"]
+
+# Run the service as a specific account. Omit the whole section for
+# LocalSystem. Passwords in this file are PLAINTEXT — for real accounts,
+# prefer installing without [service.account], then set the account in
+# services.msc (rsw refresh will not overwrite it when the section is
+# absent).
+[service.account]
+username = "NT AUTHORITY\\NetworkService"
+password = ""
+allow_logon_as_service = false   # virtual accounts already hold this right
+
+[process]
+# The program to wrap (REQUIRED).
+#     - bare names ("node.exe") resolve through PATH — but the service
+#       account's PATH differs from yours; absolute paths are safer.
+#     - relative paths resolve against the config directory.
+executable = "C:/Program Files/nodejs/node.exe"
+
+# Arguments passed to the program. Each array element is ONE argument:
+# spaces inside quotes are preserved, no re-splitting happens.
+# %VAR% expands inside every element.
+arguments = [
+    "server.js",
+    "--host", "127.0.0.1",
+    "--port", "8080",
+    "--config", "%BASE%/config/app.conf",
+]
+
+# If non-empty, replaces `arguments` when the service starts
+# (WinSW <startarguments> compatibility).
+start_arguments = []
+
+# Working directory for the child. Defaults to the config directory.
+working_dir = "%BASE%"
+
+# Stop helper command. When set, rsw runs THIS instead of sending a
+# signal (for programs that only stop via a dedicated command/API call).
+stop_executable = ""
+stop_arguments = []
+
+# Seconds to wait after the stop request before force-killing the
+# whole process tree. Ignored when stop_signal = "kill" (immediate).
+stop_timeout_secs = 15
+
+# How to ask the child to stop (DEFAULT: "kill"):
+#     "kill"        TerminateProcess + job-object tree kill immediately;
+#                   stop_timeout_secs is ignored; no flush/cleanup chance
+#     "ctrl-c"      graceful console signal — the child can flush state and
+#                   clean up; use for JVM/node/anything with shutdown hooks
+#     "ctrl-break"  targeted ctrl-break (works even for children that
+#                   disable ctrl-c)
+stop_signal = "kill"
+
+# Child process priority: idle | below-normal | normal |
+# above-normal | high | realtime.
+priority = "normal"
+
+# Accepted for WinSW compatibility only — it has NO effect. rsw children
+# always share the wrapper's hidden console (a separate hidden console
+# would make stop signals undeliverable), so nothing ever pops up.
+hide_window = true
+
+# Child exit codes that count as SUCCESS (mapped to service
+# NO_ERROR; the SCM failure counter does not tick for these).
+success_exit_codes = [0]
+
+# ---------------------------------------------------------------------------
+# In-wrapper restart policy. WITHOUT this section (the default), any
+# child exit exits the service with the same code — the SCM failure
+# actions below take over immediately (WinSW parity). WITH this section,
+# rsw restarts the child in-process (millisecond-fast, logs keep
+# flowing); when retries are exhausted the service exits with the child's
+# code and hands over to [[on_failure]].
+# ---------------------------------------------------------------------------
+[process.restart]
+
+# When to restart the child:
+#     "never"      never restart inside the wrapper (pure SCM handling)
+#     "on-failure" restart when the exit code is NOT in success_exit_codes
+#     "always"     restart on every exit, success or not
+#     "custom"     use restart_if / restart_if_not lists
+policy = "on-failure"
+
+# Custom mode — restart ONLY for these exit codes.
+restart_if = []
+
+# Custom mode — restart for every code EXCEPT these.
+restart_if_not = []
+
+# Seconds to wait before each restart attempt.
+delay_secs = 5
+
+# Exponential backoff (5 → 10 → 20 … capped at 60s); the counter
+# resets after 60 seconds of stable uptime.
+backoff = true
+
+# Max consecutive restarts before giving up and exiting the service
+# (handing over to [[on_failure]]). 0 = unlimited.
+max_retries = 0
+
+# ---------------------------------------------------------------------------
+# Environment variables injected into the child (on top of the system
+# environment). Values support %BASE% and %VAR% expansion. rsw always
+# adds BASE, SERVICE_ID, RSW_EXECUTABLE (plus WINSW_* aliases).
+# ---------------------------------------------------------------------------
+[env]
+NODE_ENV = "production"
+DATA_DIR = "%BASE%/data"
+
+# ---------------------------------------------------------------------------
+# SCM-native failure recovery. Fires when the SERVICE exits non-cleanly
+# (including "restarts exhausted" above). These are Windows recovery
+# actions — they work even if rsw itself dies. Entries apply in order,
+# the last one repeats.
+# ---------------------------------------------------------------------------
+[[on_failure]]
+action = "restart"     # restart | reboot | none
+delay = "10 sec"
+
+[[on_failure]]
+action = "restart"
+delay = "30 sec"
+
+# ---------------------------------------------------------------------------
+# Log handling for the child's stdout/stderr. The child never touches
+# log files directly — rsw pumps the pipes.
+# ---------------------------------------------------------------------------
+[logging]
+
+# Log directory (created automatically). Default: the config directory.
+dir = "%BASE%/logs"
+
+# Base name for log files. Default: the config file's stem.
+#     stdout → <base>.out.log, stderr → <base>.err.log,
+#     wrapper events → <base>.wrapper.log
+basename = "my-app"
+
+# Write rsw's own lifecycle events (start/stop/restart/signal/hook
+# outcomes, timestamped) to <base>.wrapper.log. Set false to keep only
+# the child's own logs.
+wrapper_log = true
+
+# Rotation mode:
+#     "append"            single file, grows forever
+#     "reset"             truncate at every service start
+#     "none"              discard child output
+#     "roll"              rename to <base>.old at every service start
+#     "roll-by-size"      rotate when the live file exceeds size_threshold_mb
+#     "roll-by-time"      write into a file named by time_pattern
+#     "roll-by-size-time" rotate on size, date change, or auto_roll_at
+mode = "roll-by-size"
+
+# Size threshold (MB) for the size-based modes.
+size_threshold_mb = 10
+
+# Date pattern for time-based names. Tokens: yyyy yy MM dd HH mm ss
+# (WinSW .NET-style).
+time_pattern = "yyyyMMdd"
+
+# Time of day for an extra forced rotation (roll-by-size-time only).
+auto_roll_at = "00:00:00"
+
+# Rotated files to keep per stream; -1 keeps everything.
+keep_files = 8
+
+# Merge stderr into the stdout log instead of a separate .err.log.
+merge_stderr = false
+
+# >>>> download-begin (full build only; lite packages strip this block) <<<<
+# ---------------------------------------------------------------------------
+# Files downloaded at every service start, before the child spawns.
+# Conditional GET: unchanged files (per the server's Last-Modified) are
+# skipped. Written to <to>.tmp then renamed — never half-written.
+# The sections below need the FULL build (rsw --version shows "(full)");
+# lite builds have no download support.
+# ---------------------------------------------------------------------------
+[[download]]
+from = "https://example.com/agent/agent.jar"
+to = "%BASE%/downloads/agent.jar"
+
+# Fail the service start when a download fails (default: log a warning
+# and continue with whatever is on disk).
+fail_on_error = false
+
+# Whole-request budget in seconds (connect + headers + body). A stalled
+# server counts as a failed download instead of wedging the service start.
+timeout_secs = 120
+
+# HTTP(S) proxy, optionally with credentials: http://user:pass@host:port
+# proxy = "http://proxy.corp.local:8080"
+
+# Basic auth for the download (SSPI is not supported).
+# auth = { kind = "basic", user = "deploy", password = "secret" }
+
+# ---------------------------------------------------------------------------
+# TLS options for THIS download entry. `ca` replaces the root set used
+# to verify the *server* certificate (a CA bundle with several certs is
+# fine) — certificate verification is NEVER disabled, there is no
+# insecure option. `client_cert` + `client_key` enable mTLS (the server
+# asks the client to identify itself); they must be set together. PEM
+# only: certificates as `CERTIFICATE` blocks, the key unencrypted as
+# PKCS8 `PRIVATE KEY` (recommended), `RSA PRIVATE KEY`, or
+# `EC PRIVATE KEY`. Paths support %BASE%; the service account (SYSTEM by
+# default) must be able to read the files.
+# ---------------------------------------------------------------------------
+[download.tls]
+# ca = "%BASE%/certs/internal-root.pem"
+# client_cert = "%BASE%/certs/client.pem"
+# client_key = "%BASE%/certs/client-key.pem"
+# >>>> download-end <<<<
+
+# ---------------------------------------------------------------------------
+# Map a network drive letter to a UNC share before the child starts.
+# ---------------------------------------------------------------------------
+[[map_drive]]
+label = "N:"
+unc_path = "\\\\fileserver.corp.local\\share"
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks — short commands around the child's lifetime. Each
+# hook: executable + arguments, output paths ("NUL" discards), and a
+# timeout after which the hook AND its children are killed. The service
+# waits for hooks: pre_start failure aborts the start; the stop ladder
+# waits for pre_stop before signalling the child.
+# ---------------------------------------------------------------------------
+[hooks]
+pre_start = { executable = "%BASE%/scripts/prepare.cmd", arguments = ["--env", "prod"], stdout = "%BASE%/logs/pre-start.log", stderr = "NUL", timeout_secs = 30 }
+# post_start = { executable = "notify.cmd", arguments = ["started"], stdout = "NUL", stderr = "NUL", timeout_secs = 60 }
+# pre_stop = { executable = "drain.cmd", arguments = [], stdout = "NUL", stderr = "NUL", timeout_secs = 60 }
+post_stop = { executable = "%BASE%/scripts/cleanup.cmd", arguments = [], stdout = "NUL", stderr = "NUL", timeout_secs = 30 }
