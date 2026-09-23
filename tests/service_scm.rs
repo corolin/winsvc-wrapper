@@ -429,3 +429,222 @@ fn account_check(dir: &std::path::Path, password: &str) {
     let out = rsw(&["uninstall", cfg2.to_str().unwrap()], dir);
     assert!(out.status.success(), "uninstall failed");
 }
+
+// ---------------------------------------------------------------------------
+// allow_start_stop delegation (SDDL DACL) + apply
+// ---------------------------------------------------------------------------
+
+const DELG_SERVICE: &str = "rsw-scm-sddl-test";
+
+fn current_account() -> String {
+    format!(
+        "{}\\{}",
+        std::env::var("USERDOMAIN").unwrap_or_default(),
+        std::env::var("USERNAME").unwrap_or_default()
+    )
+}
+
+fn write_delegated_config(dir: &std::path::Path, account: &str) -> PathBuf {
+    let child = TEST_CHILD.replace('\\', "/");
+    let cfg = dir.join("sddl.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"[service]
+id = "{DELG_SERVICE}"
+start_type = "manual"
+allow_start_stop = ["{account}"]
+
+[process]
+executable = "{child}"
+arguments = ["sleep", "60000"]
+
+[logging]
+dir = "logs"
+mode = "append"
+"#
+        ),
+    )
+    .unwrap();
+    cfg
+}
+
+/// Reads the service DACL back as an SDDL string. The service SID string in
+/// each ACE is compared byte-for-byte — no localized output is involved.
+fn service_dacl_sddl(name: &str) -> anyhow::Result<String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceObjectSecurity,
+        SC_MANAGER_CONNECT, SERVICE_ALL_ACCESS,
+    };
+    use windows::core::PCWSTR;
+
+    let name_w: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    unsafe {
+        let manager = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(|e| anyhow::anyhow!("OpenSCManager: {e}"))?;
+        let svc = OpenServiceW(manager, PCWSTR(name_w.as_ptr()), SERVICE_ALL_ACCESS)
+            .map_err(|e| anyhow::anyhow!("OpenService: {e}"));
+        let _ = CloseServiceHandle(manager);
+        let svc = svc?;
+
+        let mut buf = [0u8; 8192];
+        let mut needed = 0u32;
+        let q = QueryServiceObjectSecurity(
+            svc,
+            DACL_SECURITY_INFORMATION.0,
+            Some(PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast())),
+            buf.len() as u32,
+            &mut needed,
+        );
+        let _ = CloseServiceHandle(svc);
+        q.map_err(|e| anyhow::anyhow!("QueryServiceObjectSecurity: {e}"))?;
+
+        let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+        let mut sddl = windows::core::PWSTR::null();
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut sddl,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("converting the DACL to SDDL failed: {e}"))?;
+        let out = sddl.to_string().map_err(|e| anyhow::anyhow!("{e}"));
+        let _ = LocalFree(Some(HLOCAL(sddl.as_ptr().cast())));
+        out
+    }
+}
+
+#[test]
+#[ignore = "requires an elevated prompt; run with --ignored"]
+fn allow_start_stop_dacl_and_unelevated_start_stop() {
+    if ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE).is_err() {
+        eprintln!("skipped: not elevated (run from an administrator prompt)");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("rsw-scm-sddl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("logs")).unwrap();
+    let account = current_account();
+    let cfg = write_delegated_config(&dir, &account);
+
+    let result = std::panic::catch_unwind(|| delegation_check(&dir, &cfg, &account));
+
+    if let Some(s) = open_named_service(DELG_SERVICE, ServiceAccess::ALL_ACCESS) {
+        let _ = s.stop();
+        let _ = s.delete();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn delegation_check(dir: &std::path::Path, cfg: &std::path::Path, account: &str) {
+    // validate must resolve the account to a SID before anything touches the SCM
+    let out = rsw(&["validate", cfg.to_str().unwrap()], dir);
+    assert!(
+        out.status.success(),
+        "validate failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let prefix = format!("allow_start_stop: {account} -> ");
+    let sid = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("validate must print `{prefix}<SID>`: {stdout}"))
+        .to_string();
+    assert!(sid.starts_with("S-1-"), "unexpected SID `{sid}`");
+
+    let out = rsw(&["install", cfg.to_str().unwrap()], dir);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // the persisted DACL must contain the start/stop/query ACE for the
+    // delegated SID, with admins and SYSTEM keeping full control
+    let dacl = service_dacl_sddl(DELG_SERVICE).expect("reading the service DACL");
+    let ace = format!("(A;;RPWPLC;;;{sid})");
+    assert!(dacl.contains(&ace), "DACL `{dacl}` must contain `{ace}`");
+    assert!(
+        dacl.contains("(A;;GA;;;BA)"),
+        "admins must keep full control: {dacl}"
+    );
+    assert!(
+        dacl.contains("(A;;GA;;;SY)"),
+        "SYSTEM must keep full control: {dacl}"
+    );
+
+    // the acid test: a restricted (basic-user, non-elevated) token must be
+    // able to start AND stop with --no-elevate — the proof that a delegated
+    // user needs no UAC prompt at all. runas launches the child in its own
+    // console; the service state is the authoritative signal.
+    for verb in ["start", "stop"] {
+        let want = if verb == "start" {
+            ServiceState::Running
+        } else {
+            ServiceState::Stopped
+        };
+        let out = Command::new("runas")
+            .args([
+                "/trustlevel:0x20000",
+                &format!(
+                    "\"{}\" {verb} --no-elevate \"{}\"",
+                    RSW,
+                    cfg.to_str().unwrap()
+                ),
+            ])
+            .current_dir(dir)
+            .output()
+            .expect("runas failed to launch");
+        assert!(
+            wait_named_state(DELG_SERVICE, want, Duration::from_secs(30)),
+            "unelevated `rsw {verb}` did not reach {want:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // apply on a stopped service: refresh + start in one command
+    let out = rsw(&["apply", cfg.to_str().unwrap()], dir);
+    assert!(
+        out.status.success(),
+        "apply failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        wait_named_state(DELG_SERVICE, ServiceState::Running, Duration::from_secs(20)),
+        "apply must start a stopped service"
+    );
+
+    // apply on a running service: config is refreshed, the service is left
+    // running (no restart)
+    let out = rsw(&["apply", cfg.to_str().unwrap()], dir);
+    assert!(
+        out.status.success(),
+        "second apply failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("config takes effect on next start"),
+        "apply must leave a running service alone: {stdout}"
+    );
+    assert!(
+        wait_named_state(DELG_SERVICE, ServiceState::Running, Duration::from_secs(5)),
+        "service must stay running"
+    );
+
+    let out = rsw(&["uninstall", cfg.to_str().unwrap()], dir);
+    assert!(out.status.success(), "uninstall failed");
+}

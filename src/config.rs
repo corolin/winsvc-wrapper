@@ -120,6 +120,11 @@ pub struct ServiceConfig {
     /// Optional SDDL security descriptor applied to the service.
     #[serde(default)]
     pub security_descriptor: Option<String>,
+    /// Accounts granted SERVICE_START/SERVICE_STOP via a generated SDDL
+    /// DACL, so these users can start/stop the service without elevation.
+    /// Mutually exclusive with security_descriptor (validate rejects both).
+    #[serde(default)]
+    pub allow_start_stop: Vec<String>,
     /// Optional service account; absent = LocalSystem.
     #[serde(default)]
     pub account: Option<AccountConfig>,
@@ -560,6 +565,13 @@ impl Config {
                 ));
             }
         }
+        if !svc.allow_start_stop.is_empty() && svc.security_descriptor.is_some() {
+            errors.push(
+                "[service] allow_start_stop and security_descriptor are mutually exclusive: \
+                 allow_start_stop generates a DACL, a custom security_descriptor replaces it"
+                    .into(),
+            );
+        }
         let proc = &self.process;
         if proc.executable.trim().is_empty() {
             errors.push("[process] executable must not be empty".into());
@@ -884,6 +896,9 @@ impl Resolved {
         if let Some(sddl) = &mut self.cfg.service.security_descriptor {
             *sddl = expand_vars(sddl, &base);
         }
+        for acct in &mut self.cfg.service.allow_start_stop {
+            *acct = expand_vars(acct, &base);
+        }
         // Fleet deployments inject the service-account password from the
         // environment (e.g. password = "%DSV_SVC_PASS%") so it never lands
         // in the config file.
@@ -1076,6 +1091,38 @@ executable = "app.exe"
         assert_eq!(cfg.logging.keep_files, 8);
         assert_eq!(cfg.service.failure_reset_after, 86_400_000);
         assert_eq!(cfg.on_failure.len(), 0);
+    }
+
+    #[test]
+    fn allow_start_stop_and_security_descriptor_conflict() {
+        let both = r#"
+[service]
+id = "myapp"
+security_descriptor = "D:P(A;;GA;;;BA)"
+allow_start_stop = ["BUILTIN\\Users"]
+
+[process]
+executable = "app.exe"
+"#;
+        let cfg: Config = Config::parse(ConfigFormat::Toml, both, Path::new("app.toml")).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("mutually exclusive"),
+            "unexpected error: {err}"
+        );
+
+        let delegated = r#"
+[service]
+id = "myapp"
+allow_start_stop = ["BUILTIN\\Users", "%OPS_GROUP%"]
+
+[process]
+executable = "app.exe"
+"#;
+        let cfg: Config =
+            Config::parse(ConfigFormat::Toml, delegated, Path::new("app.toml")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.service.allow_start_stop.len(), 2);
     }
 
     #[test]

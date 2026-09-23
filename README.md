@@ -59,7 +59,8 @@ without failing.
   accounts with automatic *SeServiceLogonRight* grant, `on_failure` recovery
   actions, pre/post hooks, startup downloads (with custom CA / mTLS PEM
   options — verification is never disabled), drive mapping, SDDL security
-  descriptors, `refresh` without reinstall.
+  descriptors (incl. `allow_start_stop` delegation for UAC-free start/stop),
+  `refresh` without reinstall.
 - **Both config languages** — TOML and YAML, same schema, detected by extension.
 
 ## CLI
@@ -71,16 +72,19 @@ without failing.
 | `rsw start / stop / restart [config]` | Lifecycle |
 | `rsw status [config]` | Print state; exit 0 running/stopped, 1 transitional, 1060 not installed |
 | `rsw refresh [config]` | Re-read config and update service properties in place |
+| `rsw apply [config]` | Refresh config, then start if not running (one UAC prompt; never restarts a running service) |
 | `rsw run [config]` | Run in the foreground for debugging (no SCM, no admin, Ctrl+C stops) |
 | `rsw validate [config]` | Parse + validate and print the resolved config (secrets masked) |
 | `rsw convert winsw.xml` | Convert a WinSW XML service definition into an rsw TOML file |
 
 `[config]` is optional when using the sidecar rename convention.
 
-Admin commands (`install`/`uninstall`/`start`/`stop`/`restart`/`refresh`) run
-from a non-elevated terminal trigger **one UAC prompt** and complete in place;
-the elevated output is echoed back to your terminal. Pass `--no-elevate` to
-disable this and fail with a hint instead.
+`install`/`uninstall`/`refresh`/`apply` run from a non-elevated terminal
+trigger **one UAC prompt** and complete in place; the elevated output is
+echoed back to your terminal. `start`/`stop`/`restart` try unelevated first
+and only prompt after an access-denied error — a service whose DACL delegates
+start/stop (`allow_start_stop`) needs no elevation at all. Pass `--no-elevate`
+to disable auto-elevation and fail with a hint instead.
 
 ## Configuration reference
 
@@ -98,6 +102,7 @@ failure_reset_after = "1 day"     # SCM failure-counter reset window
 preshutdown = false               # accept PRESHUTDOWN notifications
 preshutdown_timeout_secs = 180
 # security_descriptor = "D:P(A;;GA;;;BA)(A;;GR;;;AU)"   # SDDL
+allow_start_stop = []             # accounts that may start/stop without UAC (generated DACL; exclusive with security_descriptor)
 
 # [service.account]               # omit for LocalSystem
 # username = ".\\svc_user"        # or DOMAIN\\user or NT AUTHORITY\\NetworkService
