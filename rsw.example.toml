@@ -63,6 +63,15 @@ preshutdown_timeout_secs = 180
 # 中文：SDDL 安全描述符，限制哪些账户可以控制本服务。按需取消注释。
 # security_descriptor = "D:P(A;;GA;;;BA)(A;;GR;;;AU)"
 
+# EN: accounts that may start/stop THIS service without elevation (no UAC).
+#     rsw generates the service DACL granting them SERVICE_START/SERVICE_STOP;
+#     admins and SYSTEM keep full control. Mutually exclusive with
+#     security_descriptor above.
+# 中文：允许免提权（无 UAC）启停本服务的账户。rsw 会生成服务 DACL，授予
+#     这些账户 SERVICE_START/SERVICE_STOP（管理员与 SYSTEM 仍保留完全控制）。
+#     与上方 security_descriptor 互斥。
+# allow_start_stop = ["BUILTIN\\Users", "DOMAIN\\ops"]
+
 # EN: run the service as a specific account. Omit the whole section for
 #     LocalSystem. Passwords in this file are PLAINTEXT — for real accounts,
 #     prefer installing without [service.account], then set the account in

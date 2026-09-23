@@ -55,7 +55,8 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
 - **对齐 WinSW 功能面** — 启动类型（含延迟启动）、依赖服务、服务账户
   （自动授予 *SeServiceLogonRight*）、`on_failure` 恢复动作、pre/post 钩子、
   启动前下载（支持自定义 CA 与 mTLS PEM——证书验证永不关闭）、网络盘映射、
-  SDDL 安全描述符、免重装的 `refresh`。
+  SDDL 安全描述符（含 `allow_start_stop` 委派免提权启停）、免重装的
+  `refresh`。
 - **TOML 与 YAML 双格式** — 同一 schema，按扩展名识别。
 
 ## 命令行
@@ -67,6 +68,7 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
 | `rsw start / stop / restart [配置]` | 生命周期 |
 | `rsw status [配置]` | 打印状态；退出码 0 运行/停止、1 过渡态、1060 未安装 |
 | `rsw refresh [配置]` | 重读配置并原地更新服务属性 |
+| `rsw apply [配置]` | 刷新配置并确保服务已启动（一次 UAC；运行中的服务不重启） |
 | `rsw run [配置]` | 前台调试运行（不进 SCM、无需管理员，Ctrl+C 触发停止阶梯） |
 | `rsw validate [配置]` | 校验并打印解析后的配置 |
 | `rsw convert winsw.xml` | 把 WinSW XML 服务定义转换成 rsw TOML |
@@ -74,9 +76,10 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
 使用改名约定时 `[配置]` 可省略。完整字段参考见
 [README.md](README.md#configuration-reference)（英文，含全部默认值）。
 
-管理类命令（`install`/`uninstall`/`start`/`stop`/`restart`/`refresh`）在普通
-终端执行时会**自动弹一次 UAC** 并原地完成，提权进程的输出会回显到当前终端；
-加 `--no-elevate` 可禁用自动提权（恢复为报错并提示）。
+`install`/`uninstall`/`refresh`/`apply` 在普通终端执行时会**自动弹一次 UAC**
+并原地完成，提权进程的输出会回显到当前终端；`start`/`stop`/`restart` 先以
+普通权限尝试、被拒绝后才提权——服务 DACL 已委派启停权限（[service]
+`allow_start_stop`）时全程零弹窗。加 `--no-elevate` 可禁用自动提权。
 
 ### 日志文件命名
 

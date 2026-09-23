@@ -19,13 +19,18 @@ pub const DELIVER_CTRL_COMMAND: &str = "__deliver-ctrl";
     name = "rsw",
     version = VERSION,
     about = "rsw — Rust Service Wrapper: run any executable as a Windows service",
-    after_help = "The config path is optional when rsw.exe is renamed (e.g. app.exe picks up app.toml)."
+    after_help = "The config path is optional when rsw.exe is renamed (e.g. app.exe picks up app.toml).
+
+Elevation: install/uninstall/refresh/apply trigger one UAC prompt when needed.
+start/stop/restart try unelevated first and only prompt after access is denied —
+with [service] allow_start_stop in the config they need no elevation at all."
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// Don't auto-elevate via UAC for admin commands; fail with a hint instead.
+    /// Don't auto-elevate via UAC; fail with a hint instead when a command
+    /// needs rights the current token lacks.
     #[arg(long, global = true)]
     pub no_elevate: bool,
 
@@ -57,6 +62,10 @@ pub enum Command {
     Status { config: Option<PathBuf> },
     /// Re-read the config and update service properties without reinstall.
     Refresh { config: Option<PathBuf> },
+    /// Refresh the config, then start the service if it is not already
+    /// running — one UAC prompt instead of two. A running service is left
+    /// alone (the change takes effect on its next start).
+    Apply { config: Option<PathBuf> },
     /// Run the wrapped process in the foreground for debugging (no SCM, no admin).
     Run { config: Option<PathBuf> },
     /// Parse and validate the config, then print the resolved result.
