@@ -1,0 +1,267 @@
+# ============================================================================
+# rsw 配置参考 —— 全部字段（中文）
+#
+# 常用经典起步模板见 rsw.example.toml。
+#
+# 将本文件放在 rsw.exe 旁边（rsw.exe 可改名），或通过命令行显式传入：
+#   rsw install rsw.example-full-cn.toml
+#
+# 在下方所有字符串字段中，%BASE% 展开为本文件所在目录；
+# %任意变量% 从进程环境变量展开。相对路径一律基于本文件所在目录。
+# ============================================================================
+
+[service]
+# Windows 服务的唯一标识（必填）。供 SCM 使用，不能含 '/' 或 '\'。
+id = "my-app"
+
+# services.msc 中显示的名称。默认与 id 相同。
+name = "My Application"
+
+# 服务属性对话框中显示的详细描述。
+description = "Example service wrapped by rsw"
+
+# 开机启动方式：
+#     "auto"     开机自动启动
+#     "delayed"  开机延迟启动（等其他自动服务就绪后，应用服务推荐）
+#     "manual"   手动启动（sc start / rsw start）
+#     "disabled" 禁用，无法启动
+#     "boot"/"system" 仅驱动使用的启动类型
+start_type = "auto"
+
+# 必须在本服务之前启动的其他服务 id。
+dependencies = ["Tcpip"]
+
+# 无失败持续多久后，SCM 的失败计数清零。
+#     单位后缀：ms/sec/min/hr/day；纯数字表示毫秒。
+failure_reset_after = "1 day"
+
+# 接收 Windows 预关机通知（系统关机前给服务额外的优雅停止时间）。
+preshutdown = false
+
+# 预关机时允许的最长停止时间（秒），仅当 preshutdown = true 时生效。
+preshutdown_timeout_secs = 180
+
+# SDDL 安全描述符，限制哪些账户可以控制本服务。按需取消注释。
+# security_descriptor = "D:P(A;;GA;;;BA)(A;;GR;;;AU)"
+
+# 允许免提权（无 UAC）启停本服务的账户。rsw 会生成服务 DACL，授予
+# 这些账户 SERVICE_START/SERVICE_STOP（管理员与 SYSTEM 仍保留完全控制）。
+# 与上方 security_descriptor 互斥。
+# allow_start_stop = ["BUILTIN\\Users", "DOMAIN\\ops"]
+
+# 以指定账户运行服务。删除整个 [service.account] 段 = 以 LocalSystem
+# 运行。注意：写在本文件里的密码是明文——真实账户建议先不写此段完成
+# 安装，再到 services.msc 里设置账户（本段缺省时 refresh 不会覆盖）。
+# 虚拟账户（NT AUTHORITY\LocalService / NetworkService）无需密码。
+[service.account]
+username = "NT AUTHORITY\\NetworkService"
+password = ""
+allow_logon_as_service = false   # 虚拟账户已自带此权限
+
+[process]
+# 被包装的程序（必填）。
+#     - 裸命令名（"node.exe"）会走 PATH 查找——但服务账户的 PATH 与你的
+#       用户 PATH 不同，绝对路径更稳妥。
+#     - 相对路径基于本配置文件所在目录。
+executable = "C:/Program Files/nodejs/node.exe"
+
+# 传给程序的参数。数组每个元素就是一个独立参数：引号内的空格原样
+# 保留，不会被二次拆分。每个元素内都会做 %VAR% 变量展开。
+arguments = [
+    "server.js",
+    "--host", "127.0.0.1",
+    "--port", "8080",
+    "--config", "%BASE%/config/app.conf",
+]
+
+# 非空时在服务启动时替代 `arguments`（对应 WinSW 的 <startarguments>）。
+start_arguments = []
+
+# 子进程的工作目录。默认为本配置文件所在目录。
+working_dir = "%BASE%"
+
+# 停止辅助命令。设置后 rsw 运行该命令来完成停止，不再发送控制台
+# 信号（适用于只能通过专用命令/接口关闭的程序）。
+stop_executable = ""
+stop_arguments = []
+
+# 发出停止请求后等待的秒数，超时则强杀整棵进程树。
+# stop_signal = "kill" 时忽略本项（立即强杀）。
+stop_timeout_secs = 15
+
+# 停止子进程的方式（默认："kill"）：
+#     "kill"        立即 TerminateProcess + Job Object 树杀；
+#                   忽略 stop_timeout_secs；子进程没有机会落盘/清理
+#     "ctrl-c"      优雅的控制台信号——子进程可以刷缓冲、做清理；适合
+#                   JVM/node/一切带关闭钩子的程序
+#     "ctrl-break"  定向 ctrl-break（对禁用了 ctrl-c 的子进程也有效）
+stop_signal = "kill"
+
+# 子进程的 CPU 优先级：idle | below-normal | normal |
+# above-normal | high | realtime。
+priority = "normal"
+
+# 仅为兼容 WinSW 保留，**没有实际作用**。子进程始终共享 rsw 的隐藏
+# 控制台（单独的隐藏控制台会导致停止信号无法送达），不会弹出窗口。
+hide_window = true
+
+# 视为“成功”的子进程退出码（映射为服务 NO_ERROR，SCM 的失败
+# 计数不会对这些码累加）。
+success_exit_codes = [0]
+
+# ---------------------------------------------------------------------------
+# 包装器内的重启策略。没有本段（默认）时：子进程退出，服务就以相同
+# 退出码退出——由下方的 SCM 失败动作立即接管（与 WinSW 行为一致）。
+# 显式配置本段后，rsw 会在进程内重启子进程（毫秒级，日志与管道不断开）；
+# 重试次数用尽后，服务带着子进程的退出码退出，交给 [[on_failure]]。
+# ---------------------------------------------------------------------------
+[process.restart]
+
+# 何时重启子进程：
+#     "never"      包装器内不重启，完全交给 SCM 失败动作
+#     "on-failure" 退出码不在 success_exit_codes 中时重启
+#     "always"     无论退出码是什么都重启
+#     "custom"     使用 restart_if / restart_if_not 列表精确控制
+policy = "on-failure"
+
+# custom 模式——仅对这些退出码重启。
+restart_if = []
+
+# custom 模式——除这些退出码外都重启。
+restart_if_not = []
+
+# 每次重启前等待的秒数。
+delay_secs = 5
+
+# 指数退避（5 → 10 → 20 …封顶 60 秒）；稳定运行 60 秒后计数归零。
+backoff = true
+
+# 连续重启的最大次数，超过后放弃并退出服务（交给 [[on_failure]]）。
+# 0 = 不限次数。
+max_retries = 0
+
+# ---------------------------------------------------------------------------
+# 注入子进程的环境变量（叠加在系统环境之上）。取值支持 %BASE% 与
+# %VAR% 展开。rsw 始终额外注入 BASE、SERVICE_ID、RSW_EXECUTABLE
+# （以及 WINSW_* 兼容别名）。
+# ---------------------------------------------------------------------------
+[env]
+NODE_ENV = "production"
+DATA_DIR = "%BASE%/data"
+
+# ---------------------------------------------------------------------------
+# SCM 原生失败恢复动作。服务非正常退出时触发（包括上方重试次数用尽
+# 的情况）。这是 Windows 原生恢复机制——即使 rsw 自身崩溃也照常生效。
+# 多条按顺序生效，最后一条循环使用。
+# ---------------------------------------------------------------------------
+[[on_failure]]
+action = "restart"     # restart 重启 | reboot 重启机器 | none 不动作
+delay = "10 sec"
+
+[[on_failure]]
+action = "restart"
+delay = "30 sec"
+
+# ---------------------------------------------------------------------------
+# 子进程 stdout/stderr 的日志处理。子进程从不直接接触日志文件，
+# 由 rsw 通过管道搬运。
+# ---------------------------------------------------------------------------
+[logging]
+
+# 日志目录（自动创建）。默认为本配置文件所在目录。
+dir = "%BASE%/logs"
+
+# 日志文件的基础名。默认取配置文件名（去扩展名）。
+#     标准输出 → <base>.out.log，标准错误 → <base>.err.log，
+#     rsw 自身事件 → <base>.wrapper.log
+basename = "my-app"
+
+# 把 rsw 自身的生命周期事件（启动/停止/重启/信号/钩子结果，带时间戳）
+# 写入 <base>.wrapper.log。设为 false 则只保留子进程自己的日志。
+wrapper_log = true
+
+# 轮转模式：
+#     "append"            单文件持续追加
+#     "reset"             每次服务启动时清空
+#     "none"              丢弃子进程输出
+#     "roll"              每次服务启动时改名为 <base>.old
+#     "roll-by-size"      超过 size_threshold_mb 时轮转
+#     "roll-by-time"      直接写入按 time_pattern 命名的文件
+#     "roll-by-size-time" 大小、日期变化或 auto_roll_at 任一满足即轮转
+mode = "roll-by-size"
+
+# 基于大小的轮转阈值（MB）。
+size_threshold_mb = 10
+
+# 时间轮转的日期命名格式。支持标记：yyyy yy MM dd HH mm ss
+# （与 WinSW 的 .NET 风格一致）。
+time_pattern = "yyyyMMdd"
+
+# 每天在该时刻额外强制轮转一次（仅 roll-by-size-time 模式）。
+auto_roll_at = "00:00:00"
+
+# 每路日志保留的轮转文件数；-1 表示全部保留。
+keep_files = 8
+
+# 把 stderr 合并进 stdout 日志，而不是单独的 .err.log。
+merge_stderr = false
+
+# >>>> download-begin（仅 full 构建；lite 包自动剥离本段）<<<<
+# ---------------------------------------------------------------------------
+# 每次服务启动时、子进程启动前下载的文件。支持条件请求：与服务器
+# 相比未变化的文件（依据 Last-Modified）自动跳过。先写临时文件再改名，
+# 不会出现写了一半的文件。
+# 下方段落需要 full 构建（rsw --version 显示 "(full)"）；lite 构建不支持
+# 下载。
+# ---------------------------------------------------------------------------
+[[download]]
+from = "https://example.com/agent/agent.jar"
+to = "%BASE%/downloads/agent.jar"
+
+# 下载失败时是否让服务启动失败（默认：仅记录警告，继续用磁盘上的
+# 旧文件启动）。
+fail_on_error = false
+
+# 整个请求的时间预算（秒，含连接、响应头、正文）。服务器卡住时按
+# 下载失败处理，而不会拖死服务启动。
+timeout_secs = 120
+
+# HTTP(S) 代理，可带凭据：http://user:pass@host:port
+# proxy = "http://proxy.corp.local:8080"
+
+# 下载的 Basic 认证（不支持 SSPI）。
+# auth = { kind = "basic", user = "deploy", password = "secret" }
+
+# ---------------------------------------------------------------------------
+# 本条下载的 TLS 选项。`ca` 替换验证**服务器**证书所用的根证书集
+# （可以放多张证书的 CA bundle）——证书验证**永不关闭**，不存在跳过
+# 校验的选项。`client_cert` + `client_key` 启用 mTLS（服务器要求客户端
+# 出示身份）；两者必须成对出现。仅支持 PEM：证书为 `CERTIFICATE` 块，
+# 私钥为未加密的 PKCS8 `PRIVATE KEY`（推荐）、`RSA PRIVATE KEY` 或
+# `EC PRIVATE KEY`。路径支持 %BASE%；服务账户（默认 SYSTEM）必须能
+# 读取这些文件。
+# ---------------------------------------------------------------------------
+[download.tls]
+# ca = "%BASE%/certs/internal-root.pem"
+# client_cert = "%BASE%/certs/client.pem"
+# client_key = "%BASE%/certs/client-key.pem"
+# >>>> download-end <<<<
+
+# ---------------------------------------------------------------------------
+# 在子进程启动前把网络驱动器号映射到 UNC 共享路径。
+# ---------------------------------------------------------------------------
+[[map_drive]]
+label = "N:"
+unc_path = "\\\\fileserver.corp.local\\share"
+
+# ---------------------------------------------------------------------------
+# 生命周期钩子——围绕子进程生命周期的短命令。每个钩子包含
+# executable + arguments、输出重定向路径（"NUL" 表示丢弃）、超时秒数
+# （超时后钩子及其子进程一并被杀）。服务会等待钩子完成：pre_start
+# 失败会中止启动；停止流程会先等 pre_stop 完成再向子进程发信号。
+# ---------------------------------------------------------------------------
+[hooks]
+pre_start = { executable = "%BASE%/scripts/prepare.cmd", arguments = ["--env", "prod"], stdout = "%BASE%/logs/pre-start.log", stderr = "NUL", timeout_secs = 30 }
+# post_start = { executable = "notify.cmd", arguments = ["started"], stdout = "NUL", stderr = "NUL", timeout_secs = 60 }
+# pre_stop = { executable = "drain.cmd", arguments = [], stdout = "NUL", stderr = "NUL", timeout_secs = 60 }
+post_stop = { executable = "%BASE%/scripts/cleanup.cmd", arguments = [], stdout = "NUL", stderr = "NUL", timeout_secs = 30 }
