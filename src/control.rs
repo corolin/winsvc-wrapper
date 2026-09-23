@@ -13,7 +13,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::account::ensure_logon_as_service;
 use crate::config::{FailureAction, Resolved, StartType};
-use crate::sddl::apply_security_descriptor;
+use crate::sddl::{account_to_sid_string, apply_security_descriptor, build_delegated_sddl};
 
 fn winapi_code(e: &windows_service::Error) -> Option<i32> {
     match e {
@@ -23,16 +23,39 @@ fn winapi_code(e: &windows_service::Error) -> Option<i32> {
 }
 
 fn admin_hint(e: windows_service::Error) -> anyhow::Error {
-    if winapi_code(&e) == Some(5) {
-        anyhow::anyhow!("{e}\nhint: managing services requires an elevated (administrator) prompt")
+    let err: anyhow::Error = e.into();
+    if is_access_denied(&err) {
+        err.context("hint: managing services requires an elevated (administrator) prompt")
     } else {
-        anyhow::anyhow!(e)
+        err
     }
+}
+
+/// True when the error chain bottoms out in ERROR_ACCESS_DENIED (5) from the
+/// SCM — the signal main.rs uses to fall back to the elevated relaunch for
+/// start/stop/restart.
+pub fn is_access_denied(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<windows_service::Error>()
+            .is_some_and(winapi_code_is_access_denied)
+    })
+}
+
+fn winapi_code_is_access_denied(e: &windows_service::Error) -> bool {
+    winapi_code(e) == Some(5)
 }
 
 fn connect_manager() -> anyhow::Result<ServiceManager> {
     ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::ALL_ACCESS)
         .map_err(admin_hint)
+}
+
+/// Minimal manager handle (SC_MANAGER_CONNECT): the most an unelevated,
+/// delegated user (allow_start_stop) may need. ALL_ACCESS here would reject
+/// standard users before the service DACL ever gets consulted.
+fn connect_manager_minimal() -> anyhow::Result<ServiceManager> {
+    ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(admin_hint)
 }
 
 fn open_service(
@@ -118,6 +141,15 @@ fn apply_service_properties(
     }
     if let Some(sddl) = &svc.security_descriptor {
         apply_security_descriptor(resolved.service_id(), sddl)?;
+    } else if !svc.allow_start_stop.is_empty() {
+        // Resolve on the target machine at install/refresh time: fleet
+        // deploys ship account names, not SIDs. Unknown accounts fail loudly
+        // rather than silently shipping a DACL without them.
+        let mut sids = Vec::with_capacity(svc.allow_start_stop.len());
+        for name in &svc.allow_start_stop {
+            sids.push(account_to_sid_string(name)?);
+        }
+        apply_security_descriptor(resolved.service_id(), &build_delegated_sddl(&sids))?;
     }
     Ok(())
 }
@@ -200,8 +232,12 @@ pub fn uninstall(resolved: &Resolved) -> anyhow::Result<u32> {
     Ok(0)
 }
 
+/// start/stop/restart only need the SERVICE_START/SERVICE_STOP bits, which
+/// the service DACL may delegate (allow_start_stop): they run with a minimal
+/// CONNECT manager handle so an unelevated, delegated user succeeds without
+/// any UAC prompt. main.rs elevates on ERROR_ACCESS_DENIED.
 pub fn start(resolved: &Resolved) -> anyhow::Result<u32> {
-    let manager = connect_manager()?;
+    let manager = connect_manager_minimal()?;
     let service = open_service(&manager, resolved.service_id(), ServiceAccess::START)?;
     service.start(&[] as &[&str]).map_err(admin_hint)?;
     println!("service `{}` started", resolved.service_id());
@@ -209,7 +245,7 @@ pub fn start(resolved: &Resolved) -> anyhow::Result<u32> {
 }
 
 pub fn stop(resolved: &Resolved) -> anyhow::Result<u32> {
-    let manager = connect_manager()?;
+    let manager = connect_manager_minimal()?;
     let service = open_service(&manager, resolved.service_id(), ServiceAccess::STOP)?;
     service.stop().map_err(admin_hint)?;
     println!("service `{}` stop requested", resolved.service_id());
@@ -217,7 +253,7 @@ pub fn stop(resolved: &Resolved) -> anyhow::Result<u32> {
 }
 
 pub fn restart(resolved: &Resolved) -> anyhow::Result<u32> {
-    let manager = connect_manager()?;
+    let manager = connect_manager_minimal()?;
     let service = open_service(
         &manager,
         resolved.service_id(),
@@ -238,8 +274,7 @@ pub fn restart(resolved: &Resolved) -> anyhow::Result<u32> {
 /// exit 0 = running/stopped/paused per rsw (WinSW treats Paused as 1),
 /// 1 = transitional, 1060 = not installed.
 pub fn status(resolved: &Resolved) -> anyhow::Result<u32> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .map_err(admin_hint)?;
+    let manager = connect_manager_minimal()?;
     let service = match manager.open_service(resolved.service_id(), ServiceAccess::QUERY_STATUS) {
         Ok(s) => s,
         Err(e) if winapi_code(&e) == Some(1060) => {
@@ -299,6 +334,45 @@ pub fn refresh(resolved: &Resolved) -> anyhow::Result<u32> {
         resolved.service_id(),
         resolved.config_path.display()
     );
+    Ok(0)
+}
+
+/// Refresh + ensure running in one shot: one UAC prompt instead of two
+/// (refresh then start). A running service is left alone — a config change
+/// takes effect on its next start; `rsw restart` forces it.
+pub fn apply(resolved: &Resolved) -> anyhow::Result<u32> {
+    refresh(resolved)?;
+    let manager = connect_manager_minimal()?;
+    let service = open_service(
+        &manager,
+        resolved.service_id(),
+        ServiceAccess::START | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+    )?;
+    let state = service.query_status().map_err(admin_hint)?.current_state;
+    match state {
+        ServiceState::Stopped => {}
+        ServiceState::Running | ServiceState::StartPending => {
+            println!(
+                "service `{}` is {state:?}; config takes effect on next start",
+                resolved.service_id()
+            );
+            return Ok(0);
+        }
+        // Paused-ish states can't take a plain start; not rsw's call to
+        // resume — surface it instead of timing out waiting for Stopped.
+        ServiceState::Paused | ServiceState::PausePending | ServiceState::ContinuePending => {
+            println!(
+                "service `{}` is {state:?}; config applied, start it via `rsw restart`",
+                resolved.service_id()
+            );
+            return Ok(0);
+        }
+        ServiceState::StopPending => {
+            wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(60))?;
+        }
+    }
+    service.start(&[] as &[&str]).map_err(admin_hint)?;
+    println!("service `{}` started", resolved.service_id());
     Ok(0)
 }
 

@@ -40,29 +40,25 @@ fn main() -> anyhow::Result<()> {
 
     // SCM control commands auto-elevate (one UAC prompt) when run from a
     // non-elevated terminal, mirroring WinSW; --no-elevate restores plain
-    // failure. `run`/`validate`/`status` never need it, and the elevated
-    // child itself must not recurse.
-    let needs_elevation = matches!(
+    // failure. Install/uninstall/refresh/apply need administrator rights for
+    // what they change (CREATE_SERVICE / CHANGE_CONFIG / WRITE_DAC), so they
+    // elevate pre-emptively. start/stop/restart only need the
+    // SERVICE_START/SERVICE_STOP bits and succeed unelevated when the
+    // service DACL delegates them ([service] allow_start_stop), so they try
+    // first and only relaunch elevated after ERROR_ACCESS_DENIED.
+    // `run`/`validate`/`status` never need it, and the elevated child itself
+    // must not recurse.
+    let can_relaunch =
+        !cli.elevated && !cli.no_elevate && !elevation::is_current_process_elevated();
+    let elevates_upfront = matches!(
         cli.command,
         Command::Install { .. }
             | Command::Uninstall { .. }
-            | Command::Start { .. }
-            | Command::Stop { .. }
-            | Command::Restart { .. }
             | Command::Refresh { .. }
+            | Command::Apply { .. }
     );
-    if needs_elevation
-        && !cli.elevated
-        && !cli.no_elevate
-        && !elevation::is_current_process_elevated()
-    {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let code = elevation::relaunch_elevated(
-            &std::env::current_exe()?,
-            &args,
-            &std::env::current_dir()?,
-        )?;
-        std::process::exit(code);
+    if elevates_upfront && can_relaunch {
+        std::process::exit(relaunch_elevated()?);
     }
 
     let code = match cli.command {
@@ -86,13 +82,42 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Install { config } => with_config(config.as_deref(), control::install)?,
         Command::Uninstall { config } => with_config(config.as_deref(), control::uninstall)?,
-        Command::Start { config } => with_config(config.as_deref(), control::start)?,
-        Command::Stop { config } => with_config(config.as_deref(), control::stop)?,
-        Command::Restart { config } => with_config(config.as_deref(), control::restart)?,
+        Command::Start { config } => try_then_elevate(can_relaunch, || {
+            with_config(config.as_deref(), control::start)
+        })?,
+        Command::Stop { config } => try_then_elevate(can_relaunch, || {
+            with_config(config.as_deref(), control::stop)
+        })?,
+        Command::Restart { config } => try_then_elevate(can_relaunch, || {
+            with_config(config.as_deref(), control::restart)
+        })?,
         Command::Status { config } => with_config(config.as_deref(), control::status)?,
         Command::Refresh { config } => with_config(config.as_deref(), control::refresh)?,
+        Command::Apply { config } => with_config(config.as_deref(), control::apply)?,
     };
     std::process::exit(code as i32);
+}
+
+/// Re-runs this same argv in an elevated child (runas) and returns its exit
+/// code; the parent then exits with it.
+fn relaunch_elevated() -> anyhow::Result<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    elevation::relaunch_elevated(&std::env::current_exe()?, &args, &std::env::current_dir()?)
+}
+
+/// For start/stop/restart: run the command unelevated first; on
+/// ERROR_ACCESS_DENIED (no delegation in the service DACL) fall back to the
+/// elevated relaunch — one UAC prompt, same net behavior as before for
+/// non-delegated services. `--no-elevate`/already-elevated just surfaces the
+/// access-denied error with its hint.
+fn try_then_elevate(
+    can_relaunch: bool,
+    run: impl FnOnce() -> anyhow::Result<u32>,
+) -> anyhow::Result<u32> {
+    match run() {
+        Err(e) if can_relaunch && control::is_access_denied(&e) => Ok(relaunch_elevated()? as u32),
+        other => other,
+    }
 }
 
 fn with_config(
@@ -110,6 +135,13 @@ fn load_resolved(explicit: Option<&Path>) -> anyhow::Result<config::Resolved> {
 
 fn cmd_validate(explicit: Option<&Path>) -> anyhow::Result<()> {
     let r = load_resolved(explicit)?;
+    // Surface unresolvable accounts before install, not halfway through it.
+    for name in &r.cfg.service.allow_start_stop {
+        match sddl::account_to_sid_string(name) {
+            Ok(sid) => println!("allow_start_stop: {name} -> {sid}"),
+            Err(e) => return Err(e.context("resolving [service] allow_start_stop")),
+        }
+    }
     #[cfg(not(feature = "download"))]
     if !r.cfg.download.is_empty() {
         eprintln!(
