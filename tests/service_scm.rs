@@ -228,6 +228,10 @@ switch ($op) {
     'create' {
         $sp = ConvertTo-SecureString $p -AsPlainText -Force
         New-LocalUser -Name $n -Password $sp -ErrorAction Stop | Out-Null
+        # Explicit flags: CreateService validates the logon synchronously,
+        # and default password policies (must-change / expires) make that
+        # check fail with os error 1057 on newer Windows builds.
+        Set-LocalUser -Name $n -PasswordNeverExpires $true -ErrorAction Stop
     }
     'delete' { Remove-LocalUser -Name $n -ErrorAction SilentlyContinue }
 }
@@ -446,6 +450,9 @@ fn current_account() -> String {
 
 fn write_delegated_config(dir: &std::path::Path, account: &str) -> PathBuf {
     let child = TEST_CHILD.replace('\\', "/");
+    // TOML basic-string escaping: account names carry backslashes
+    // ("COROLIN-PC\dream") that must never reach the file raw.
+    let account_toml = account.replace('\\', "\\\\").replace('"', "\\\"");
     let cfg = dir.join("sddl.toml");
     std::fs::write(
         &cfg,
@@ -453,7 +460,7 @@ fn write_delegated_config(dir: &std::path::Path, account: &str) -> PathBuf {
             r#"[service]
 id = "{DELG_SERVICE}"
 start_type = "manual"
-allow_start_stop = ["{account}"]
+allow_start_stop = ["{account_toml}"]
 
 [process]
 executable = "{child}"
