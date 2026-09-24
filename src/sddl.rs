@@ -6,7 +6,8 @@ use windows::Win32::Security::Authorization::{
 };
 use windows::Win32::Security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LookupAccountNameW,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE,
+    OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SID_NAME_USE,
 };
 use windows::Win32::System::Services::{
     CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_HANDLE, SC_MANAGER_ALL_ACCESS,
@@ -82,6 +83,33 @@ pub fn account_to_sid_string(account: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Derives the SECURITY_INFORMATION flags from the SDDL string grammar.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct SddlInfoFlags {
+    owner: bool,
+    group: bool,
+    dacl: bool,
+}
+
+impl SddlInfoFlags {
+    fn is_empty(&self) -> bool {
+        !(self.owner || self.group || self.dacl)
+    }
+}
+
+/// The O:/G:/D: section tags live in the SDDL header (before the first
+/// '('), so scanning only the header cannot be fooled by ACE contents —
+/// a conditional-ACE string could otherwise contain an "O:"/"D:"
+/// substring and request a component the descriptor does not carry.
+fn info_flags_for_sddl(sddl: &str) -> SddlInfoFlags {
+    let header = sddl.split('(').next().unwrap_or("");
+    SddlInfoFlags {
+        owner: header.contains("O:"),
+        group: header.contains("G:"),
+        dacl: header.contains("D:"),
+    }
+}
+
 /// Applies an SDDL string as the service's owner/group/DACL.
 ///
 /// `windows-service` does not expose object security, so this opens the
@@ -98,18 +126,36 @@ pub fn apply_security_descriptor(service_id: &str, sddl: &str) -> anyhow::Result
         )
         .map_err(|e| anyhow::anyhow!("invalid security_descriptor `{sddl}`: {e}"))?;
 
+        // SECURITY_INFORMATION must only name components the descriptor
+        // actually carries: requesting OWNER/GROUP on a DACL-only descriptor
+        // (e.g. the delegated allow_start_stop DACL, "D:P(...)") fails with
+        // ERROR_INVALID_PARAMETER (87). S: (SACL) is deliberately not
+        // requested — setting it needs SE_SECURITY_NAME and no config path
+        // produces one today.
+        let flags = info_flags_for_sddl(sddl);
+        if flags.is_empty() {
+            anyhow::bail!("security descriptor carries no owner/group/DACL section");
+        }
+        let mut info = OBJECT_SECURITY_INFORMATION(0);
+        if flags.owner {
+            info |= OWNER_SECURITY_INFORMATION;
+        }
+        if flags.group {
+            info |= GROUP_SECURITY_INFORMATION;
+        }
+        if flags.dacl {
+            info |= DACL_SECURITY_INFORMATION;
+        }
+
         let service = open_service(service_id)?;
-        let info =
-            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
         let result = SetServiceObjectSecurity(service, info, descriptor)
             .map_err(|e| anyhow::anyhow!("SetServiceObjectSecurity failed: {e}"));
         let _ = CloseServiceHandle(service);
-        // The self-relative descriptor is heap-allocated by the API; free it.
-        if result.is_ok() {
-            let _ = windows::Win32::Foundation::LocalFree(Some(
-                windows::Win32::Foundation::HLOCAL(descriptor.0 as _),
-            ));
-        }
+        // The self-relative descriptor is heap-allocated by the API; free it
+        // on every path (errors too — it was allocated before the call).
+        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            descriptor.0 as _,
+        )));
         result
     }
 }
@@ -128,6 +174,43 @@ pub fn open_service(service_id: &str) -> anyhow::Result<SC_HANDLE> {
             });
         let _ = CloseServiceHandle(manager);
         service
+    }
+}
+
+#[cfg(test)]
+mod info_flags_tests {
+    use super::*;
+
+    /// 0.1.3 regression: the delegated DACL carries only D:, and asking
+    /// SetServiceObjectSecurity for the missing OWNER/GROUP components
+    /// failed with ERROR_INVALID_PARAMETER (87).
+    #[test]
+    fn dacl_only_sddl_yields_dacl_flag() {
+        let f = info_flags_for_sddl(
+            "D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;RPWPLC;;;S-1-5-21-294617185-3689988605-2414484505-1001)",
+        );
+        assert!(!f.owner && !f.group && f.dacl);
+    }
+
+    #[test]
+    fn full_sddl_yields_all_flags() {
+        let f = info_flags_for_sddl("O:BAG:BAD:AI(A;;GA;;;BA)(A;;GA;;;SY)D:P(A;;RPWPLC;;;WD)");
+        assert!(f.owner && f.group && f.dacl);
+    }
+
+    #[test]
+    fn sacl_only_sddl_yields_no_flags() {
+        // SACL-only: setting S: needs SE_SECURITY_NAME and is unsupported;
+        // the caller rejects a flags-less descriptor.
+        assert!(info_flags_for_sddl("S:").is_empty());
+    }
+
+    #[test]
+    fn ace_contents_cannot_spoof_section_tags() {
+        // "D:" appears inside the ACE, but the header "O:BAG:" carries no
+        // DACL tag — only the header is scanned.
+        let f = info_flags_for_sddl("O:BAG:(A;;RPWP;;;WD;D:not-a-section-tag)");
+        assert!(f.owner && f.group && !f.dacl);
     }
 }
 
