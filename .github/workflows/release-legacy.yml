@@ -40,8 +40,36 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          Compress-Archive -Path target/x86_64-win7-windows-msvc/release/rsw.exe -DestinationPath "rsw-$tag-x86_64-win7-windows-msvc-full.zip"
-          Compress-Archive -Path target-lite/x86_64-win7-windows-msvc/release/rsw.exe -DestinationPath "rsw-$tag-x86_64-win7-windows-msvc-lite.zip"
+          $full = "rsw.example-full-en.toml", "rsw.example-full-cn.toml"
+
+          # Full manuals validate against the full build...
+          foreach ($f in $full) {
+            & target/x86_64-win7-windows-msvc/release/rsw.exe validate $f | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$f failed full-build validation" }
+          }
+
+          # ...and the lite zips get the same manuals with the download
+          # block stripped (markers in the templates), validated by the
+          # lite exe before packing. The win7-target exes run fine on the
+          # windows-latest runner (6.1-safe APIs are forward-compatible).
+          foreach ($f in $full) {
+            $strip = $false
+            $lite = (Get-Content $f -Encoding UTF8) | Where-Object {
+              if ($_ -match '^# >>>> download-begin') { $strip = $true; $false }
+              elseif ($_ -match '^# >>>> download-end') { $strip = $false; $false }
+              else { -not $strip }
+            }
+            $out = $f -replace '-full-', '-lite-'
+            # WriteAllLines: UTF-8 without BOM in both pwsh 7 and Windows
+            # PowerShell 5 (Set-Content defaults differ between them).
+            [System.IO.File]::WriteAllLines((Join-Path (Get-Location) $out), @($lite))
+            & target-lite/x86_64-win7-windows-msvc/release/rsw.exe validate $out | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$out failed lite-build validation" }
+          }
+          $liteFiles = Get-Item rsw.example-lite-*.toml | ForEach-Object { $_.FullName }
+
+          Compress-Archive -Path (@("target/x86_64-win7-windows-msvc/release/rsw.exe") + $full) -DestinationPath "rsw-$tag-x86_64-win7-windows-msvc-full.zip"
+          Compress-Archive -Path (@("target-lite/x86_64-win7-windows-msvc/release/rsw.exe") + $liteFiles) -DestinationPath "rsw-$tag-x86_64-win7-windows-msvc-lite.zip"
           Get-FileHash -Algorithm SHA256 rsw-*.zip | ForEach-Object { "{0}  {1}" -f $_.Hash, (Split-Path $_.Path -Leaf) } | Out-File -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
       - name: Upload to release

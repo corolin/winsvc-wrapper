@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    # Legacy tags are released by release-legacy.yml on the legacy branch;
+    # without this ignore both workflows fire on the same tag (the v0.1.2-
+    # legacy collision that had to be cancelled by hand).
+    tags-ignore: ["v*-legacy*"]
 
 permissions:
   contents: write
