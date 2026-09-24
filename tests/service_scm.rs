@@ -226,11 +226,16 @@ param([string]$op, [string]$n, [string]$p)
 switch ($op) {
     'exists' { if (Get-LocalUser -Name $n -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 } }
     'create' {
-        $sp = ConvertTo-SecureString $p -AsPlainText -Force
+        # Build the SecureString via .NET directly: ConvertTo-SecureString
+        # lives in Microsoft.PowerShell.Security, whose auto-loading is
+        # broken on some machines (CouldNotAutoloadMatchingModule), while
+        # ::new()/AppendChar are language/CLR features with no cmdlet
+        # dependency. CreateService validates the logon synchronously, so
+        # also pin the password policy (default must-change/expires policies
+        # fail that check with os error 1057 on newer Windows builds).
+        $sp = [System.Security.SecureString]::new()
+        foreach ($c in $p.ToCharArray()) { [void]$sp.AppendChar($c) }
         New-LocalUser -Name $n -Password $sp -ErrorAction Stop | Out-Null
-        # Explicit flags: CreateService validates the logon synchronously,
-        # and default password policies (must-change / expires) make that
-        # check fail with os error 1057 on newer Windows builds.
         Set-LocalUser -Name $n -PasswordNeverExpires $true -ErrorAction Stop
     }
     'delete' { Remove-LocalUser -Name $n -ErrorAction SilentlyContinue }
@@ -527,6 +532,34 @@ fn service_dacl_sddl(name: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Rights field of the allow-ACE granted to `sid` in an SDDL DACL string.
+/// ACEs are `(type;flags;rights;o;i;sid)`; rights are returned verbatim —
+/// callers must check membership, not equality (SCM reorders bits on
+/// read-back and expands generic rights).
+fn ace_rights(dacl: &str, sid: &str) -> Option<String> {
+    dacl.split('(').find_map(|ace| {
+        let f: Vec<&str> = ace.trim_end_matches(')').split(';').collect();
+        (f.len() == 6 && f[0] == "A" && f[5] == sid).then(|| f[2].to_string())
+    })
+}
+
+#[test]
+fn ace_rights_parses_normalized_sddl() {
+    // Verbatim read-back from a real QueryServiceObjectSecurity call: the
+    // written GA came back expanded to concrete rights and the delegated
+    // RPWPLC was reordered to LCRPWP — substring matching cannot work.
+    let dacl = "D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)(A;;LCRPWP;;;S-1-5-21-294617185-3689988605-2414484505-1001)";
+    assert_eq!(
+        ace_rights(dacl, "BA").as_deref(),
+        Some("CCDCLCSWRPWPDTLOCRSDRCWDWO")
+    );
+    let r = ace_rights(dacl, "S-1-5-21-294617185-3689988605-2414484505-1001").unwrap();
+    for right in ["LC", "RP", "WP"] {
+        assert!(r.contains(right), "`{r}` must contain {right}");
+    }
+    assert_eq!(ace_rights(dacl, "S-1-1-0"), None);
+}
+
 #[test]
 #[ignore = "requires an elevated prompt; run with --ignored"]
 fn allow_start_stop_dacl_and_unelevated_start_stop() {
@@ -578,19 +611,29 @@ fn delegation_check(dir: &std::path::Path, cfg: &std::path::Path, account: &str)
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // the persisted DACL must contain the start/stop/query ACE for the
-    // delegated SID, with admins and SYSTEM keeping full control
+    // the persisted DACL must carry the delegated ACE. Windows normalizes
+    // SDDL on read-back (rights bits are reordered, e.g. RPWPLC -> LCRPWP,
+    // and GA expands to the concrete service rights), so assert on parsed
+    // rights membership — never on raw substrings.
     let dacl = service_dacl_sddl(DELG_SERVICE).expect("reading the service DACL");
-    let ace = format!("(A;;RPWPLC;;;{sid})");
-    assert!(dacl.contains(&ace), "DACL `{dacl}` must contain `{ace}`");
-    assert!(
-        dacl.contains("(A;;GA;;;BA)"),
-        "admins must keep full control: {dacl}"
-    );
-    assert!(
-        dacl.contains("(A;;GA;;;SY)"),
-        "SYSTEM must keep full control: {dacl}"
-    );
+    let rights = ace_rights(&dacl, &sid)
+        .unwrap_or_else(|| panic!("DACL `{dacl}` has no ACE for the delegated {sid}"));
+    for right in ["LC", "RP", "WP"] {
+        assert!(
+            rights.contains(right),
+            "delegated rights `{rights}` must include {right} (DACL: {dacl})"
+        );
+    }
+    for well_known in ["BA", "SY"] {
+        let r = ace_rights(&dacl, well_known)
+            .unwrap_or_else(|| panic!("DACL `{dacl}` has no {well_known} ACE"));
+        for right in ["DC", "RP", "WP", "WD"] {
+            assert!(
+                r.contains(right),
+                "{well_known} rights `{r}` must include {right} (DACL: {dacl})"
+            );
+        }
+    }
 
     // the acid test: a restricted (basic-user, non-elevated) token must be
     // able to start AND stop with --no-elevate — the proof that a delegated
