@@ -74,7 +74,7 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
 | `rsw convert winsw.xml` | 把 WinSW XML 服务定义转换成 rsw TOML |
 
 使用改名约定时 `[配置]` 可省略。完整字段参考见
-[README.md](README.md#configuration-reference)（英文，含全部默认值）。
+[主线 README 的 Configuration Reference](https://github.com/corolin/winsvc-wrapper/tree/main#configuration-reference)（英文，含全部默认值）；本分支根目录的 README 只说明 legacy 构建与兼容性。
 
 `install`/`uninstall`/`refresh`/`apply` 在普通终端执行时会**自动弹一次 UAC**
 并原地完成，提权进程的输出会回显到当前终端；`start`/`stop`/`restart` 先以
@@ -101,7 +101,7 @@ mode = "roll-by-size"   # 超过 10 MB 轮转，保留 8 份（均为默认值�
 
 ## 从 WinSW 迁移
 
-字段对照表见 [README.md](README.md#migrating-from-winsw)。未移植：zip 归档
+字段对照表见 [主线 README 的 Migrating from WinSW](https://github.com/corolin/winsvc-wrapper/tree/main#migrating-from-winsw)。未移植：zip 归档
 （WinSW 官方承认已损坏）、`beeponshutdown`、`customize`/`dev` 子命令、
 交互式服务、v2 扩展模型。`%BASE%` 变量语义与 WinSW 相同。
 
