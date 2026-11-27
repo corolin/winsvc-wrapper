@@ -7,6 +7,9 @@ on:
   schedule:
     - cron: "0 3 * * 1" # weekly: catch new advisories in the locked dependency set
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # The run_e2e suite spawns one rsw per test, each with CREATE_NEW_CONSOLE.
