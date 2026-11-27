@@ -28,7 +28,15 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo check --no-default-features --all-targets
   ci:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,6 +44,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format
+        if: matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo fmt --all --check
       - name: Clippy (full)
         run: cargo clippy --all-targets -- -D warnings
@@ -46,7 +55,7 @@ jobs:
       - name: Upload binary (full)
         uses: actions/upload-artifact@v4
         with:
-          name: rsw-${{ runner.os }}
+          name: rsw-${{ matrix.target }}
           path: target/release/rsw.exe
       - name: Clippy (lite)
         run: cargo clippy --no-default-features --all-targets -- -D warnings
@@ -57,10 +66,12 @@ jobs:
       - name: Upload binary (lite)
         uses: actions/upload-artifact@v4
         with:
-          name: rsw-${{ runner.os }}-lite
+          name: rsw-${{ matrix.target }}-lite
           path: target/release/rsw.exe
       - name: Dependency audit (RustSec)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      - run: cargo audit
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo audit

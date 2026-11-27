@@ -12,8 +12,16 @@ env:
   RUST_TEST_THREADS: "4"
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,6 +37,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          $target = "${{ matrix.target }}"
           $full = "rsw.example-full-en.toml", "rsw.example-full-cn.toml"
 
           # Full manuals validate against the full build...
@@ -56,10 +65,27 @@ jobs:
           }
           $liteFiles = Get-Item rsw.example-lite-*.toml | ForEach-Object { $_.FullName }
 
-          Compress-Archive -Path (@("target/release/rsw.exe") + $full) -DestinationPath "rsw-$tag-x86_64-pc-windows-msvc-full.zip"
-          Compress-Archive -Path (@("target-lite/release/rsw.exe") + $liteFiles) -DestinationPath "rsw-$tag-x86_64-pc-windows-msvc-lite.zip"
-          Get-FileHash -Algorithm SHA256 rsw-*.zip | ForEach-Object { "{0}  {1}" -f $_.Hash, (Split-Path $_.Path -Leaf) } | Out-File -Encoding ascii SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
+          Compress-Archive -Path (@("target/release/rsw.exe") + $full) -DestinationPath "rsw-$tag-$target-full.zip"
+          Compress-Archive -Path (@("target-lite/release/rsw.exe") + $liteFiles) -DestinationPath "rsw-$tag-$target-lite.zip"
+      - name: Upload release archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: rsw-*.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          sha256sum rsw-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
